@@ -24,13 +24,14 @@ ONE_BUSES_DATA_COLS = ONE_BUSES_DATA_COLS_PLACEHOLDER  # [[[_; num_data]; num_bu
 ONE_BUSES_DATA_OFFSETS = ONE_BUSES_DATA_OFFSETS_PLACEHOLDER  # [[[_; num_data]; num_buses]; N_TABLES]
 ONE_BUSES_NEW_COLS = ONE_BUSES_NEW_COLS_PLACEHOLDER  # [[[_; n_new]; num_buses]; N_TABLES]
 
-NUM_COLS_AIR = NUM_COLS_AIR_PLACEHOLDER
-MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(NUM_COLS_AIR[t] for t in 0..N_TABLES)
+NUM_COLS_AIR = NUM_COLS_AIR_PLACEHOLDER  # committed columns per table (used for stacked PCS layout)
+MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(N_AIR_COLUMNS[t]) — array stride for pcs_vals
 ONE_BUSES_ALL_COLS = ONE_BUSES_ALL_COLS_PLACEHOLDER  # [[col, ...], _; N_TABLES] — sorted union of cols across all Multiplicity::One buses per table
 
 AIR_DEGREES = AIR_DEGREES_PLACEHOLDER  # [_; N_TABLES]
 MAX_AIR_FULL_DEGREE = MAX_AIR_FULL_DEGREE_PLACEHOLDER
-N_AIR_COLUMNS = N_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES]
+N_AIR_COLUMNS = N_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — total AIR columns (committed + virtual intermediates)
+N_COMMITTED_AIR_COLUMNS = N_COMMITTED_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — committed-only subset
 N_AIR_SHIFT_COLUMNS = N_AIR_SHIFT_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — by convention, shift column j of table t is column j
 AIR_ALPHA_OFFSETS = AIR_ALPHA_OFFSETS_PLACEHOLDER  # [_; N_TABLES], # AIR_ALPHA_OFFSETS[t] = sum(N_AIR_CONSTRAINTS[k] for k in range(t))
 
@@ -113,7 +114,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     n_cols_per_table = Array(N_TABLES) # indexed by table_index
     for i in unroll(0, N_TABLES):
         n_buses_per_table[i] = len(ONE_BUSES_DOMSEPS[i]) + 1 # + 1 for the precompile bus interraction (the rest is memory / bytecode interractions)
-        n_cols_per_table[i] = NUM_COLS_AIR[i]
+        n_cols_per_table[i] = N_COMMITTED_AIR_COLUMNS[i]
 
     gkr_table_base_offset = Array(N_TABLES)
     stacked_table_base_offset = Array(N_TABLES)
@@ -405,7 +406,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 whir_sum,
             )
             curr_randomness += DIM
-        for j in unroll(0, N_AIR_COLUMNS[table_index]):
+        for j in unroll(0, N_COMMITTED_AIR_COLUMNS[table_index]):
             whir_sum = add_extension_ret(
                 mul_extension_ret(pcs_vals_air[table_index * MAX_NUM_COLS_AIR + j], curr_randomness),
                 whir_sum,
@@ -486,7 +487,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]
         n_rows = table_heights[table_index]
-        total_num_cols = NUM_COLS_AIR[table_index]
+        total_num_cols = N_COMMITTED_AIR_COLUMNS[table_index]
         table_offset = stacked_table_base_offset[table_index]
 
         if table_index == EXECUTION_TABLE_INDEX:
@@ -538,7 +539,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 )
                 curr_randomness += DIM
         eq_factor_air = poly_eq_extension_dynamic_ret(all_challenges, inner_folding, log_n_rows)
-        for j in unroll(0, N_AIR_COLUMNS[table_index]):
+        for j in unroll(0, N_COMMITTED_AIR_COLUMNS[table_index]):
             prefix = column_prefixes + j * DIM
             s = add_extension_ret(
                 s,
@@ -692,7 +693,7 @@ def compute_stacked_n_vars(log_memory, log_bytecode_padded, tables_heights):
     total += two_exp(log_bytecode_padded)
     for table_index in unroll(0, N_TABLES):
         n_rows = tables_heights[table_index]
-        total += n_rows * NUM_COLS_AIR[table_index]
+        total += n_rows * N_COMMITTED_AIR_COLUMNS[table_index]
     debug_assert(30 - 24 < MIN_LOG_N_ROWS_PER_TABLE)  # cf log2_ceil
     return MIN_LOG_N_ROWS_PER_TABLE + log2_ceil_runtime(total / 2**MIN_LOG_N_ROWS_PER_TABLE)
 

@@ -93,6 +93,9 @@ impl Air for Table {
     fn n_columns(&self) -> usize {
         delegate_to_inner!(self, n_columns)
     }
+    fn n_committed_columns(&self) -> usize {
+        delegate_to_inner!(self, n_committed_columns)
+    }
     fn n_constraints(&self) -> usize {
         delegate_to_inner!(self, n_constraints)
     }

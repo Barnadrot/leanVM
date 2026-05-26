@@ -705,11 +705,12 @@ pub fn columns_evals_flat_and_shift<EF: ExtensionField<PF<EF>>, A: Air>(
     natural_ordering_point: &[EF],
 ) -> (MultilinearPoint<EF>, BTreeMap<ColIndex, EF>, BTreeMap<ColIndex, EF>) {
     let n_flat = air.n_columns();
+    let n_committed = air.n_committed_columns();
     debug_assert_eq!(col_evals.len(), n_flat + air.n_shift_columns());
 
     let point = MultilinearPoint(natural_ordering_point.to_vec());
 
-    let evals_eq: BTreeMap<ColIndex, EF> = col_evals[..n_flat].iter().copied().enumerate().collect();
+    let evals_eq: BTreeMap<ColIndex, EF> = col_evals[..n_committed].iter().copied().enumerate().collect();
     let evals_next: BTreeMap<ColIndex, EF> = col_evals[n_flat..].iter().copied().enumerate().collect();
 
     (point, evals_eq, evals_next)

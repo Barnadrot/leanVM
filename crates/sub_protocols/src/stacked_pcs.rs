@@ -55,7 +55,7 @@ pub fn stacked_pcs_global_statements(
     let mut layout_offset = (2 << memory_n_vars) + (1 << bytecode_n_vars.max(max_table_n_vars));
     for (table, n_vars) in &tables_heights_sorted {
         table_offsets.insert(*table, layout_offset);
-        layout_offset += table.n_columns() << n_vars;
+        layout_offset += table.n_committed_columns() << n_vars;
     }
 
     let mut global_statements = previous_statements;
@@ -131,13 +131,16 @@ pub fn stack_polynomials_and_commit(
 
     for (table, log_n_rows) in &tables_heights_sorted {
         let n_rows = 1 << *log_n_rows;
-        for col_index in 0..table.n_columns() {
+        for col_index in 0..table.n_committed_columns() {
             let col = &traces[table].columns[col_index];
             global_polynomial[offset..][..n_rows].copy_from_slice(&col[..n_rows]);
             offset += n_rows;
         }
     }
     assert_eq!(log2_ceil_usize(offset), stacked_n_vars);
+    eprintln!("  STACKED: offset={} nv={} mem={} bytecode_acc={} tables={:?}",
+        offset, stacked_n_vars, memory.len(), bytecode_acc.len(),
+        tables_heights_sorted.iter().map(|(t,h)| format!("{}:2^{}", t.name(), h)).collect::<Vec<_>>());
     tracing::info!(
         "{}",
         format!(
@@ -191,7 +194,7 @@ fn compute_stacked_n_vars(
         + (1 << log_bytecode.max(max_table_log_n_rows))
         + tables_log_heights
             .iter()
-            .map(|(table, log_n_rows)| table.n_columns() << log_n_rows)
+            .map(|(table, log_n_rows)| table.n_committed_columns() << log_n_rows)
             .sum::<usize>();
     log2_ceil_usize(total_len)
 }
@@ -217,7 +220,7 @@ pub fn total_whir_statements() -> usize {
                     }
                 }
             }
-            table.n_columns() + table.n_shift_columns() + seen_cols.len()
+            table.n_committed_columns() + table.n_shift_columns() + seen_cols.len()
         })
         .sum::<usize>()
         // bytecode lookup

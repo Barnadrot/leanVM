@@ -106,8 +106,9 @@ pub const POSEIDON_COL_ADDR_LEFT_LO: ColIndex = 6;
 pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
 pub const POSEIDON_COL_INPUT_START: ColIndex = 9;
-pub const POSEIDON_COL_OUT_LO: ColIndex = num_cols_poseidon_16() - 16;
-pub const POSEIDON_COL_OUT_HI: ColIndex = num_cols_poseidon_16() - 8;
+pub const POSEIDON_COL_OUT_LO: ColIndex = 9 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = 9 + WIDTH + WIDTH / 2;
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + WIDTH + WIDTH;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -293,6 +294,9 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
     fn n_columns(&self) -> usize {
         num_cols_poseidon_16()
     }
+    fn n_committed_columns(&self) -> usize {
+        N_COMMITTED_COLS_POSEIDON_16
+    }
     fn degree_air(&self) -> usize {
         // Last 4 output constraints (i in 4..8) are gated by the single linear factor
         // `(1 - flag_permute - flag_short)`, which is boolean thanks to the mutex
@@ -360,7 +364,8 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
 #[repr(C)]
 #[derive(Debug)]
 pub(super) struct Poseidon1Cols16<T> {
-    pub multiplicity: T, // 0 = padding, 1 = active
+    // committed columns (stacked in PCS)
+    pub multiplicity: T,
     pub nu_b: T,
     pub nu_c: T,
     pub flag_short: T,
@@ -369,13 +374,13 @@ pub(super) struct Poseidon1Cols16<T> {
     pub addr_left_lo: T,
     pub addr_left_hi: T,
     pub flag_permute: T,
-
     pub inputs: [T; WIDTH],
+    pub out_lo: [T; WIDTH / 2],
+    pub out_hi: [T; WIDTH / 2],
+    // virtual intermediate columns (not committed in stacked PCS)
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
-    pub out_lo: [T; WIDTH / 2],
-    pub out_hi: [T; WIDTH / 2],
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {

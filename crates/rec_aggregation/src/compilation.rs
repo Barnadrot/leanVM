@@ -334,13 +334,14 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             sorted_seen.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")
         ));
 
-        num_cols_air.push(table.n_columns().to_string());
+        num_cols_air.push(table.n_committed_columns().to_string());
         air_degrees.push(table.degree_air().to_string());
         n_air_columns.push(table.n_columns().to_string());
         n_air_shift_columns.push(table.n_shift_columns().to_string());
         n_air_constraints.push(table.n_constraints().to_string());
     }
     let max_num_cols_air = ALL_TABLES.iter().map(|t| t.n_columns()).max().unwrap();
+    let n_committed_air_columns: Vec<String> = ALL_TABLES.iter().map(|t| t.n_committed_columns().to_string()).collect();
     replacements.insert("MAX_NUM_COLS_AIR_PLACEHOLDER".to_string(), max_num_cols_air.to_string());
     replacements.insert(
         "ONE_BUSES_ALL_COLS_PLACEHOLDER".to_string(),
@@ -399,6 +400,10 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
     replacements.insert(
         "N_AIR_COLUMNS_PLACEHOLDER".to_string(),
         format!("[{}]", n_air_columns.join(", ")),
+    );
+    replacements.insert(
+        "N_COMMITTED_AIR_COLUMNS_PLACEHOLDER".to_string(),
+        format!("[{}]", n_committed_air_columns.join(", ")),
     );
     replacements.insert(
         "N_AIR_SHIFT_COLUMNS_PLACEHOLDER".to_string(),

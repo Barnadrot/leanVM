@@ -25,6 +25,10 @@ pub trait Air: Send + Sync + 'static {
 
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData);
 
+    fn n_committed_columns(&self) -> usize {
+        self.n_columns()
+    }
+
     /// If the AIR contains a `low_degree_block` sub-region, returns `(degree, n_constraints)`
     fn low_degree_air(&self) -> Option<(usize, usize)> {
         None
