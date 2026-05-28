@@ -118,7 +118,8 @@ pub fn stack_polynomials_and_commit(
         log2_strict_usize(bytecode_acc.len()),
         &tables_heights_sorted.iter().cloned().collect(),
     );
-    let mut global_polynomial = F::zero_vec(1 << stacked_n_vars); // TODO avoid cloning all witness data
+    let total_len = 1usize << stacked_n_vars;
+    let mut global_polynomial: Vec<F> = unsafe { uninitialized_vec(total_len) };
     global_polynomial[..memory.len()].copy_from_slice(memory);
     let mut offset = memory.len();
     global_polynomial[offset..][..memory_acc.len()].copy_from_slice(memory_acc);
@@ -126,7 +127,11 @@ pub fn stack_polynomials_and_commit(
 
     global_polynomial[offset..][..bytecode_acc.len()].copy_from_slice(bytecode_acc);
     let largest_table_height = 1 << tables_heights_sorted[0].1;
-    offset += largest_table_height.max(bytecode_acc.len()); // we may pad bytecode_acc to match largest table height
+    let bytecode_padded_len = largest_table_height.max(bytecode_acc.len());
+    for v in &mut global_polynomial[offset + bytecode_acc.len()..offset + bytecode_padded_len] {
+        *v = F::ZERO;
+    }
+    offset += bytecode_padded_len;
 
     for (table, log_n_rows) in &tables_heights_sorted {
         let n_rows = 1 << *log_n_rows;
@@ -137,6 +142,9 @@ pub fn stack_polynomials_and_commit(
         }
     }
     assert_eq!(log2_ceil_usize(offset), stacked_n_vars);
+    for v in &mut global_polynomial[offset..total_len] {
+        *v = F::ZERO;
+    }
     eprintln!(
         "  STACKED: offset={} nv={} mem={} bytecode_acc={} tables={:?}",
         offset,
