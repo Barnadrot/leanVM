@@ -101,11 +101,14 @@ pub fn verify_execution(
     if exec_table.bytecode_bound_columns().is_some() {
         let exec_n_vars = table_n_vars[&exec_table];
         let bytecode_n_vars = bytecode.log_size();
+        eprintln!("  verify binding GKR: exec_n_vars={exec_n_vars} bytecode_n_vars={bytecode_n_vars}");
         verifier_state.duplex();
         // Left GKR (execution table, v=exec_n_vars)
-        verify_gkr_quotient(&mut verifier_state, exec_n_vars)?;
+        let left = verify_gkr_quotient(&mut verifier_state, exec_n_vars)?;
+        eprintln!("  verify binding left GKR: OK (quotient={:?})", left.0);
         // Right GKR (bytecode table, v=bytecode_n_vars)
-        verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
+        let right = verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
+        eprintln!("  verify binding right GKR: OK (quotient={:?})", right.0);
         // TODO: verify quotient balance and add PC claims to committed_statements
         verifier_state.duplex();
     }

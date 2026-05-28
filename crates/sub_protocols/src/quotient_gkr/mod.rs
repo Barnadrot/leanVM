@@ -113,9 +113,15 @@ pub fn prove_gkr_quotient_ext<'a, EF: ExtensionField<PF<EF>>>(
     }
 
     let (top_nums, top_dens) = layers.pop().unwrap().materialise_in_full();
+    // Debug: check for zero denominators in top layer
+    for (i, d) in top_dens.iter().enumerate() {
+        if d.is_zero() {
+            eprintln!("  [prove_gkr_quotient_ext] WARNING: zero denominator at top_dens[{i}]");
+        }
+    }
     prover_state.add_extension_scalars(&top_nums);
     prover_state.add_extension_scalars(&top_dens);
-    let quotient = compute_quotient(&top_nums, &top_dens).expect("prover produced a zero denominator");
+    let quotient = compute_quotient(&top_nums, &top_dens).expect("prover produced a zero denominator (ext)");
 
     let mut point = MultilinearPoint(prover_state.sample_vec(N_VARS_TO_SEND_GKR_COEFFS));
     let mut claim_num = top_nums.evaluate(&point);

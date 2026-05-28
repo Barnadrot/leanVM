@@ -149,15 +149,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     fs, quotient_gkr, point_gkr, numerators_value, denominators_value = verify_gkr_quotient(fs, n_vars_logup_gkr)
     set_to_5_zeros(quotient_gkr)
 
-    # LOGUP* binding GKR (eprint 2025/946)
-    fs = fs_duplex(fs)
-    # Left: execution table (n_vars = log_n_cycles)
-    fs, binding_left_q, binding_left_point, _, _ = verify_gkr_quotient(fs, log_n_cycles)
-    # Right: bytecode table (n_vars = LOG_GUEST_BYTECODE_LEN)
-    fs, binding_right_q, binding_right_point, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
-    # TODO: check binding_left_q + binding_right_q == 0
-    fs = fs_duplex(fs)
-
     memory_and_acc_prefix = multilinear_location_prefix(0, n_vars_logup_gkr - log_memory, point_gkr)
 
     fs, value_acc = fs_receive_ef_inlined(fs, 1)
@@ -311,6 +302,15 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     memory_and_acc_point = point_gkr + (n_vars_logup_gkr - log_memory) * DIM
 
     # END OF LOGUP
+
+    # LOGUP* binding GKR (eprint 2025/946)
+    fs = fs_duplex(fs)
+    # Left: execution table (n_vars = log_n_cycles)
+    fs, binding_left_q, binding_left_point, _, _ = verify_gkr_quotient(fs, log_n_cycles)
+    # Right: bytecode table (n_vars = LOG_GUEST_BYTECODE_LEN)
+    fs, binding_right_q, binding_right_point, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
+    # TODO: check binding_left_q + binding_right_q == 0
+    fs = fs_duplex(fs)
 
     # VERIFY BUS AND AIR — back-loaded batched sumcheck
 
