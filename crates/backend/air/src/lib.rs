@@ -29,6 +29,15 @@ pub trait Air: Send + Sync + 'static {
         self.n_columns()
     }
 
+    /// Columns bound by a bytecode-lookup sumcheck (LOGUP* / eprint 2025/946).
+    /// These columns are NOT committed in the stacked PCS but ARE sound because
+    /// their evaluations at any random point are provably derived from the committed
+    /// index column (PC) and the known bytecode table via a product sumcheck.
+    /// Returns the range [start, end) of bytecode-bound column indices.
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
     /// If the AIR contains a `low_degree_block` sub-region, returns `(degree, n_constraints)`
     fn low_degree_air(&self) -> Option<(usize, usize)> {
         None

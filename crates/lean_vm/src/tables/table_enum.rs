@@ -96,6 +96,9 @@ impl Air for Table {
     fn n_committed_columns(&self) -> usize {
         delegate_to_inner!(self, n_committed_columns)
     }
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        delegate_to_inner!(self, bytecode_bound_columns)
+    }
     fn n_constraints(&self) -> usize {
         delegate_to_inner!(self, n_constraints)
     }
@@ -178,17 +181,21 @@ mod tests {
                         // Multiplicity::One bus: column evaluations at the GKR
                         // point become WHIR opening claims. PCS binding is
                         // required for input consistency between AIR and LOGUP.
-                        // Without it a malicious prover can satisfy the AIR and
-                        // LOGUP checks independently with inconsistent column
-                        // values at the two random evaluation points.
+                        // Exception: columns in bytecode_bound_columns() are
+                        // bound via a product sumcheck against the committed
+                        // index column + known bytecode table (LOGUP* approach,
+                        // eprint 2025/946).
+                        let bc_bound = table.bytecode_bound_columns();
                         for &col in &bus_cols {
+                            let is_bytecode_bound = bc_bound
+                                .as_ref()
+                                .is_some_and(|range| range.contains(&col));
                             assert!(
-                                col < n_committed,
+                                col < n_committed || is_bytecode_bound,
                                 "SOUNDNESS: table {}: Multiplicity::One bus references col {} \
-                                 which is outside the committed range [0, {}). \
-                                 LOGUP requires PCS binding for these columns. \
-                                 Either commit the column (move it before n_committed_columns) \
-                                 or use LOGUP* with a helper commitment.",
+                                 which is outside the committed range [0, {}) and not \
+                                 bytecode-bound. LOGUP requires PCS binding or sumcheck \
+                                 binding for these columns.",
                                 table.name(), col, n_committed,
                             );
                         }
