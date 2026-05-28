@@ -107,6 +107,7 @@ pub fn verify_execution(
         // Right GKR (bytecode table, v=bytecode_n_vars)
         verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
         // TODO: verify quotient balance and add PC claims to committed_statements
+        verifier_state.duplex();
     }
 
     let mut committed_statements: CommittedStatements = Default::default();

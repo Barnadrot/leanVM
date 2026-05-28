@@ -181,6 +181,7 @@ pub fn prove_execution(
         );
         eprintln!("  LOGUP* binding GKR: {:.0}ms (left_q={:?}, right_q={:?})",
             t_binding.elapsed().as_secs_f64() * 1000.0, left.0, right.0);
+        prover_state.duplex();
     }
 
     let mut committed_statements: CommittedStatements = Default::default();

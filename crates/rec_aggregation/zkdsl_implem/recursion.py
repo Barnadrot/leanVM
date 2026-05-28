@@ -156,6 +156,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     # Right: bytecode table (n_vars = LOG_GUEST_BYTECODE_LEN)
     fs, binding_right_q, binding_right_point, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
     # TODO: check binding_left_q + binding_right_q == 0
+    fs = fs_duplex(fs)
 
     memory_and_acc_prefix = multilinear_location_prefix(0, n_vars_logup_gkr - log_memory, point_gkr)
 
