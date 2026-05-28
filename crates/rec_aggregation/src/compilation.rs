@@ -280,6 +280,7 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
     let mut n_air_shift_columns = vec![];
     let mut n_air_constraints = vec![];
     let mut one_buses_all_cols = vec![];
+    let mut one_buses_committed_cols = vec![];
     for table in ALL_TABLES {
         let mut table_domseps = vec![];
         let mut table_data_cols = vec![];
@@ -333,8 +334,18 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             "[{}]",
             sorted_seen.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")
         ));
+        let n_committed = table.n_committed_columns();
+        let committed_seen: Vec<ColIndex> = sorted_seen.iter().copied().filter(|&c| c < n_committed).collect();
+        one_buses_committed_cols.push(format!(
+            "[{}]",
+            committed_seen
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
 
-        num_cols_air.push(table.n_committed_columns().to_string());
+        num_cols_air.push(n_committed.to_string());
         air_degrees.push(table.degree_air().to_string());
         n_air_columns.push(table.n_columns().to_string());
         n_air_shift_columns.push(table.n_shift_columns().to_string());
@@ -346,6 +357,10 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
     replacements.insert(
         "ONE_BUSES_ALL_COLS_PLACEHOLDER".to_string(),
         format!("[{}]", one_buses_all_cols.join(", ")),
+    );
+    replacements.insert(
+        "ONE_BUSES_COMMITTED_COLS_PLACEHOLDER".to_string(),
+        format!("[{}]", one_buses_committed_cols.join(", ")),
     );
     replacements.insert(
         "ONE_BUSES_DOMSEPS_PLACEHOLDER".to_string(),

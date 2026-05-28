@@ -146,12 +146,16 @@ mod tests {
             assert!(
                 n_committed <= n_total,
                 "table {}: n_committed_columns ({}) > n_columns ({})",
-                table.name(), n_committed, n_total,
+                table.name(),
+                n_committed,
+                n_total,
             );
             assert!(
                 n_total <= n_total_with_virtual,
                 "table {}: n_columns ({}) > n_columns_total ({})",
-                table.name(), n_total, n_total_with_virtual,
+                table.name(),
+                n_total,
+                n_total_with_virtual,
             );
 
             for bus in table.bus_interactions() {
@@ -166,14 +170,18 @@ mod tests {
                             *mult_col < n_total_with_virtual,
                             "table {}: Multiplicity::Column bus references multiplicity col {} \
                              but n_columns_total = {}",
-                            table.name(), mult_col, n_total_with_virtual,
+                            table.name(),
+                            mult_col,
+                            n_total_with_virtual,
                         );
                         for &col in &bus_cols {
                             assert!(
                                 col < n_total_with_virtual,
                                 "table {}: Multiplicity::Column bus references col {} \
                                  but n_columns_total = {}",
-                                table.name(), col, n_total_with_virtual,
+                                table.name(),
+                                col,
+                                n_total_with_virtual,
                             );
                         }
                     }
@@ -187,16 +195,16 @@ mod tests {
                         // eprint 2025/946).
                         let bc_bound = table.bytecode_bound_columns();
                         for &col in &bus_cols {
-                            let is_bytecode_bound = bc_bound
-                                .as_ref()
-                                .is_some_and(|range| range.contains(&col));
+                            let is_bytecode_bound = bc_bound.as_ref().is_some_and(|range| range.contains(&col));
                             assert!(
                                 col < n_committed || is_bytecode_bound,
                                 "SOUNDNESS: table {}: Multiplicity::One bus references col {} \
                                  which is outside the committed range [0, {}) and not \
                                  bytecode-bound. LOGUP requires PCS binding or sumcheck \
                                  binding for these columns.",
-                                table.name(), col, n_committed,
+                                table.name(),
+                                col,
+                                n_committed,
                             );
                         }
                     }
@@ -214,7 +222,9 @@ mod tests {
                 n_shift <= n_committed,
                 "table {}: n_shift_columns ({}) > n_committed_columns ({}). \
                  Shift columns must be committed for WHIR opening at the next-row point.",
-                table.name(), n_shift, n_committed,
+                table.name(),
+                n_shift,
+                n_committed,
             );
         }
     }

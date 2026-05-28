@@ -1,7 +1,7 @@
 use backend::*;
 use lean_vm::{
-    ALL_TABLES, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE,
-    N_INSTRUCTION_COLUMNS, STARTING_PC, sort_tables_by_height,
+    ALL_TABLES, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE, STARTING_PC,
+    sort_tables_by_height,
 };
 use lean_vm::{EF, F, Table, TableT, TableTrace};
 use std::collections::BTreeMap;
@@ -75,25 +75,24 @@ pub fn stacked_pcs_global_statements(
                 EF::from_usize(ending_pc),
             ));
         }
+        let n_committed = table.n_committed_columns();
         for (point, eq_values, next_values) in &committed_statements[&table] {
-            if !next_values.is_empty() {
-                global_statements.push(SparseStatement::new_next(
-                    stacked_n_vars,
-                    point.clone(),
-                    next_values
-                        .iter()
-                        .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
-                        .collect(),
-                ));
+            let committed_next: Vec<_> = next_values
+                .iter()
+                .filter(|&(&col_index, _)| col_index < n_committed)
+                .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
+                .collect();
+            if !committed_next.is_empty() {
+                global_statements.push(SparseStatement::new_next(stacked_n_vars, point.clone(), committed_next));
             }
-            global_statements.push(SparseStatement::new(
-                stacked_n_vars,
-                point.clone(),
-                eq_values
-                    .iter()
-                    .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
-                    .collect(),
-            ));
+            let committed_eq: Vec<_> = eq_values
+                .iter()
+                .filter(|&(&col_index, _)| col_index < n_committed)
+                .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
+                .collect();
+            if !committed_eq.is_empty() {
+                global_statements.push(SparseStatement::new(stacked_n_vars, point.clone(), committed_eq));
+            }
         }
     }
     global_statements
@@ -138,9 +137,17 @@ pub fn stack_polynomials_and_commit(
         }
     }
     assert_eq!(log2_ceil_usize(offset), stacked_n_vars);
-    eprintln!("  STACKED: offset={} nv={} mem={} bytecode_acc={} tables={:?}",
-        offset, stacked_n_vars, memory.len(), bytecode_acc.len(),
-        tables_heights_sorted.iter().map(|(t,h)| format!("{}:2^{}", t.name(), h)).collect::<Vec<_>>());
+    eprintln!(
+        "  STACKED: offset={} nv={} mem={} bytecode_acc={} tables={:?}",
+        offset,
+        stacked_n_vars,
+        memory.len(),
+        bytecode_acc.len(),
+        tables_heights_sorted
+            .iter()
+            .map(|(t, h)| format!("{}:2^{}", t.name(), h))
+            .collect::<Vec<_>>()
+    );
     tracing::info!(
         "{}",
         format!(
@@ -220,10 +227,11 @@ pub fn total_whir_statements() -> usize {
                     }
                 }
             }
-            table.n_committed_columns() + table.n_shift_columns() + seen_cols.len()
+            let n_committed = table.n_committed_columns();
+            let committed_seen = seen_cols.iter().filter(|&&c| c < n_committed).count();
+            n_committed + table.n_shift_columns() + committed_seen
         })
         .sum::<usize>()
-        // bytecode lookup
+        // bytecode lookup: PC (col 0) is committed, instruction cols are bytecode-bound (not WHIR claims)
         + 1 // PC
-        + N_INSTRUCTION_COLUMNS
 }

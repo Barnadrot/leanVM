@@ -27,6 +27,7 @@ ONE_BUSES_NEW_COLS = ONE_BUSES_NEW_COLS_PLACEHOLDER  # [[[_; n_new]; num_buses];
 NUM_COLS_AIR = NUM_COLS_AIR_PLACEHOLDER  # committed columns per table (used for stacked PCS layout)
 MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(N_AIR_COLUMNS[t]) — array stride for pcs_vals
 ONE_BUSES_ALL_COLS = ONE_BUSES_ALL_COLS_PLACEHOLDER  # [[col, ...], _; N_TABLES] — sorted union of cols across all Multiplicity::One buses per table
+ONE_BUSES_COMMITTED_COLS = ONE_BUSES_COMMITTED_COLS_PLACEHOLDER  # [[col, ...]] — subset within n_committed_columns
 
 AIR_DEGREES = AIR_DEGREES_PLACEHOLDER  # [_; N_TABLES]
 MAX_AIR_FULL_DEGREE = MAX_AIR_FULL_DEGREE_PLACEHOLDER
@@ -390,9 +391,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             whir_sum = add_extension_ret(mul_extension_ret(embed_in_ef(ENDING_PC), curr_randomness), whir_sum)
             curr_randomness += DIM
 
-        # LOGUP
-        for k in unroll(0, len(ONE_BUSES_ALL_COLS[table_index])):
-            col = ONE_BUSES_ALL_COLS[table_index][k]
+        # LOGUP (only committed columns contribute to WHIR claims)
+        for k in unroll(0, len(ONE_BUSES_COMMITTED_COLS[table_index])):
+            col = ONE_BUSES_COMMITTED_COLS[table_index][k]
             whir_sum = add_extension_ret(
                 mul_extension_ret(pcs_vals_logup[table_index * MAX_NUM_COLS_AIR + col], curr_randomness),
                 whir_sum,
@@ -519,8 +520,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         # LOGUP
         point_logup = pcs_inner_points[table_index]
         eq_factor_logup = poly_eq_extension_dynamic_ret(point_logup, inner_folding, log_n_rows)
-        for k in unroll(0, len(ONE_BUSES_ALL_COLS[table_index])):
-            col = ONE_BUSES_ALL_COLS[table_index][k]
+        for k in unroll(0, len(ONE_BUSES_COMMITTED_COLS[table_index])):
+            col = ONE_BUSES_COMMITTED_COLS[table_index][k]
             prefix = column_prefixes + col * DIM
             s = add_extension_ret(
                 s,
