@@ -162,25 +162,24 @@ pub fn prove_execution(
     );
     let gkr_point = &logup_statements.gkr_point;
 
-    // --- LOGUP* bytecode binding sanity check ---
-    if let (Some((pushforward, logup_star_r)), Some(bc_range)) =
+    // --- LOGUP* bytecode binding GKR proof ---
+    if let (Some((pushforward, logup_star_r)), Some(_bc_range)) =
         (&logup_star_pushforward, exec_table.bytecode_bound_columns())
     {
         let exec_trace = &traces[&exec_table];
-        let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
-        let derived_evals = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
+        let eq_r = logup_star_data.as_ref().unwrap().eq_r.clone();
+        let pc_col = &exec_trace.columns[EXEC_COL_PC];
+
+        let t_binding = std::time::Instant::now();
+        let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
+            &mut prover_state,
+            &eq_r,
+            pc_col,
             pushforward,
-            &bytecode.instructions_multilinear,
-            bc_range.len(),
-            bytecode_stride,
+            logup_c,
         );
-        // Verify at the LOGUP* r point (not r_gkr)
-        let direct_evals: Vec<EF> = bc_range.clone().map(|col| {
-            exec_trace.columns[col].evaluate(&MultilinearPoint(logup_star_r.iter().rev().copied().collect()))
-        }).collect();
-        for (k, (derived, direct)) in derived_evals.iter().zip(direct_evals.iter()).enumerate() {
-            debug_assert_eq!(*derived, *direct, "pushforward derivation mismatch at col {k}");
-        }
+        eprintln!("  LOGUP* binding GKR: {:.0}ms (left_q={:?}, right_q={:?})",
+            t_binding.elapsed().as_secs_f64() * 1000.0, left.0, right.0);
     }
 
     let mut committed_statements: CommittedStatements = Default::default();

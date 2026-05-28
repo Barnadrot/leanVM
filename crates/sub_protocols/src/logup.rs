@@ -111,29 +111,11 @@ pub fn prove_generic_logup(
     });
     offset += memory.len();
 
-    // Bytecode section.
+    // Bytecode section (standard LOGUP — LOGUP* binding GKR runs separately).
     assert_eq!(1 << log_bytecode, bytecode_acc.len());
-    if let Some(ls) = logup_star {
-        // LOGUP* right side (eprint 2025/946): num = -P[j], den = c - j
-        for (_j, slot) in numerators[offset..][..bytecode_acc.len()].iter_mut().enumerate() {
-            *slot = F::ZERO; // Placeholder: numerator is extension-field P[j], handled below
-        }
-        fill_denoms(
-            &mut denominators[offset / width..][..(1 << log_bytecode) / width],
-            |p| {
-                c_packed - EFPacking::<EF>::from(PFPacking::<EF>::from_fn(|w| F::from_usize(src_idx(p, w))))
-            },
-        );
-        // TODO: numerators need to be extension-field (P[j]), but the current GKR
-        // infrastructure uses base-field numerators. This requires modifying the GKR
-        // to accept extension-field numerators for the bytecode section.
-        // For now, the standard bytecode section is used as fallback.
-        eprintln!("  LOGUP* integrated GKR: bytecode section modified (WIP - extension numerators TBD)");
-    } else {
-        fill_num_from(&mut numerators[offset..][..bytecode_acc.len()], bytecode_acc, true);
-    }
+    fill_num_from(&mut numerators[offset..][..bytecode_acc.len()], bytecode_acc, true);
     let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
-    if logup_star.is_none() {
+    {
         fill_denoms(
             &mut denominators[offset / width..][..(1 << log_bytecode) / width],
             |p| {
