@@ -44,6 +44,9 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
     fn n_columns(&self) -> usize {
         29
     }
+    fn n_committed_columns(&self) -> usize {
+        COL_IDX_RES + 1 // 14: shift cols + idx_res, memory value cols are virtual
+    }
     fn degree_air(&self) -> usize {
         6
     }

@@ -253,6 +253,10 @@ pub fn prove_generic_logup(
     );
 
     // sanity check
+    if sum != EF::ZERO {
+        eprintln!("  LOGUP quotient sum != 0: {sum:?}");
+        eprintln!("  total_active_len={total_active_len}, pivot={pivot}");
+    }
     assert_eq!(sum, EF::ZERO);
 
     // Memory: ...
