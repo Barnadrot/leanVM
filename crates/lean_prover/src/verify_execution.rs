@@ -96,6 +96,19 @@ pub fn verify_execution(
         &table_n_vars,
     )?;
     let gkr_point = &logup_statements.gkr_point;
+
+    // LOGUP* binding GKR verification (must consume transcript data matching prover)
+    if exec_table.bytecode_bound_columns().is_some() {
+        let exec_n_vars = table_n_vars[&exec_table];
+        let bytecode_n_vars = bytecode.log_size();
+        verifier_state.duplex();
+        // Left GKR (execution table, v=exec_n_vars)
+        verify_gkr_quotient(&mut verifier_state, exec_n_vars)?;
+        // Right GKR (bytecode table, v=bytecode_n_vars)
+        verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
+        // TODO: verify quotient balance and add PC claims to committed_statements
+    }
+
     let mut committed_statements: CommittedStatements = Default::default();
     for table in ALL_TABLES {
         let log_n = table_n_vars[&table];

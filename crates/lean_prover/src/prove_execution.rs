@@ -171,6 +171,7 @@ pub fn prove_execution(
         let pc_col = &exec_trace.columns[EXEC_COL_PC];
 
         let t_binding = std::time::Instant::now();
+        prover_state.duplex();
         let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
             &mut prover_state,
             &eq_r,
