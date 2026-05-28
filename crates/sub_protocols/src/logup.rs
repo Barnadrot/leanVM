@@ -22,6 +22,15 @@ pub struct GenericLogupStatements {
     pub bytecode_evaluation: Option<Evaluation<EF>>,
 }
 
+/// LOGUP* data for bytecode binding (eprint 2025/946).
+/// When present, replaces the standard bytecode bus fingerprint with the
+/// pushforward-based LOGUP* equation, enabling bytecode-bound columns to
+/// be excluded from the stacked PCS.
+pub struct LogupStarData {
+    pub pushforward: Vec<EF>,
+    pub eq_r: Vec<EF>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 pub fn prove_generic_logup(
