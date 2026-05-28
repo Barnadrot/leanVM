@@ -99,16 +99,17 @@ pub const POSEIDON_OFFSET_LEFT_SHIFT: usize = 1 << 4;
 pub const POSEIDON_COL_MULTIPLICITY: ColIndex = 0;
 pub const POSEIDON_COL_NU_B: ColIndex = 1;
 pub const POSEIDON_COL_NU_C: ColIndex = 2;
-pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 3;
-pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 4;
-pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 5;
-pub const POSEIDON_COL_ADDR_LEFT_LO: ColIndex = 6;
-pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 7;
-pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
-pub const POSEIDON_COL_INPUT_START: ColIndex = 9;
-pub const POSEIDON_COL_OUT_LO: ColIndex = 9 + WIDTH;
-pub const POSEIDON_COL_OUT_HI: ColIndex = 9 + WIDTH + WIDTH / 2;
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + WIDTH + WIDTH;
+pub const POSEIDON_COL_ADDR_LEFT_LO: ColIndex = 3;
+pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 4;
+pub const POSEIDON_COL_INPUT_START: ColIndex = 5;
+pub const POSEIDON_COL_OUT_LO: ColIndex = 5 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = 5 + WIDTH + WIDTH / 2;
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 5 + WIDTH + WIDTH;
+// virtual control columns (not bus-referenced, AIR-only)
+pub const POSEIDON_COL_FLAG_SHORT: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
+pub const POSEIDON_COL_FLAG_LEFT: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 1;
+pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 2;
+pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 3;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -364,20 +365,21 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
 #[repr(C)]
 #[derive(Debug)]
 pub(super) struct Poseidon1Cols16<T> {
-    // committed columns (stacked in PCS)
+    // committed columns (stacked in PCS, bus-referenced)
     pub multiplicity: T,
     pub nu_b: T,
     pub nu_c: T,
-    pub flag_short: T,
-    pub flag_left: T,
-    pub offset_left: T,
     pub addr_left_lo: T,
     pub addr_left_hi: T,
-    pub flag_permute: T,
     pub inputs: [T; WIDTH],
     pub out_lo: [T; WIDTH / 2],
     pub out_hi: [T; WIDTH / 2],
-    // virtual intermediate columns (not committed in stacked PCS)
+    // virtual control columns (AIR-only, no bus reference)
+    pub flag_short: T,
+    pub flag_left: T,
+    pub offset_left: T,
+    pub flag_permute: T,
+    // virtual intermediate columns
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],

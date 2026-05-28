@@ -114,11 +114,14 @@ pub fn get_execution_trace(
     // For permute=0 rows, override unconstrained output columns with memory values
     // so the lookup matches. Same when half_output=1.
     {
+        let flag_short_col = poseidon_trace.columns[POSEIDON_COL_FLAG_SHORT].clone();
+        let permute_col = poseidon_trace.columns[POSEIDON_COL_FLAG_PERMUTE].clone();
+        let nu_c_col = poseidon_trace.columns[POSEIDON_COL_NU_C].clone();
         let split = POSEIDON_COL_OUT_LO + HALF_DIGEST_LEN;
-        let (left, right) = poseidon_trace.columns.split_at_mut(split);
-        let flag_short_col = &left[POSEIDON_COL_FLAG_SHORT];
-        let permute_col = &left[POSEIDON_COL_FLAG_PERMUTE];
-        let nu_c_col = &left[POSEIDON_COL_NU_C];
+        let (_left, right) = poseidon_trace.columns.split_at_mut(split);
+        let flag_short_col = &flag_short_col;
+        let permute_col = &permute_col;
+        let nu_c_col = &nu_c_col;
         const N: usize = HALF_DIGEST_LEN + DIGEST_LEN;
         let cols: &mut [Vec<F>; N] = (&mut right[..N]).try_into().unwrap();
 
