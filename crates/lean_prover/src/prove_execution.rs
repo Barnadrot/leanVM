@@ -143,6 +143,12 @@ pub fn prove_execution(
     let logup_alphas = prover_state.sample_vec(LOG_MAX_BUS_WIDTH);
     let logup_alphas_eq_poly = eval_eq(&logup_alphas);
 
+    let logup_star_data = logup_star_pushforward.as_ref().map(|(pushforward, logup_star_r)| {
+        LogupStarData {
+            pushforward: pushforward.clone(),
+            eq_r: eval_eq(&logup_star_r),
+        }
+    });
     let logup_statements = prove_generic_logup(
         &mut prover_state,
         logup_c,
@@ -152,6 +158,7 @@ pub fn prove_execution(
         &bytecode.instructions_multilinear,
         &bytecode_acc,
         &traces,
+        logup_star_data.as_ref(),
     );
     let gkr_point = &logup_statements.gkr_point;
 
