@@ -132,4 +132,83 @@ mod tests {
             .unwrap();
         assert_eq!(MAX_BUS_WIDTH, expected_max_bus_width);
     }
+
+    #[test]
+    fn committed_columns_cover_bus_referenced_columns() {
+        for table in ALL_TABLES {
+            let n_committed = table.n_committed_columns();
+            let n_total = table.n_columns();
+            let n_total_with_virtual = table.n_columns_total();
+
+            assert!(
+                n_committed <= n_total,
+                "table {}: n_committed_columns ({}) > n_columns ({})",
+                table.name(), n_committed, n_total,
+            );
+            assert!(
+                n_total <= n_total_with_virtual,
+                "table {}: n_columns ({}) > n_columns_total ({})",
+                table.name(), n_total, n_total_with_virtual,
+            );
+
+            for bus in table.bus_interactions() {
+                let bus_cols: Vec<ColIndex> = std::iter::once(&bus.domainsep)
+                    .chain(bus.data.iter())
+                    .filter_map(|entry| entry.column())
+                    .collect();
+
+                match &bus.multiplicity {
+                    BusMultiplicity::Column(mult_col) => {
+                        assert!(
+                            *mult_col < n_total_with_virtual,
+                            "table {}: Multiplicity::Column bus references multiplicity col {} \
+                             but n_columns_total = {}",
+                            table.name(), mult_col, n_total_with_virtual,
+                        );
+                        for &col in &bus_cols {
+                            assert!(
+                                col < n_total_with_virtual,
+                                "table {}: Multiplicity::Column bus references col {} \
+                                 but n_columns_total = {}",
+                                table.name(), col, n_total_with_virtual,
+                            );
+                        }
+                    }
+                    BusMultiplicity::One => {
+                        // Multiplicity::One bus: column evaluations at the GKR
+                        // point become WHIR opening claims. PCS binding is
+                        // required for input consistency between AIR and LOGUP.
+                        // Without it a malicious prover can satisfy the AIR and
+                        // LOGUP checks independently with inconsistent column
+                        // values at the two random evaluation points.
+                        for &col in &bus_cols {
+                            assert!(
+                                col < n_committed,
+                                "SOUNDNESS: table {}: Multiplicity::One bus references col {} \
+                                 which is outside the committed range [0, {}). \
+                                 LOGUP requires PCS binding for these columns. \
+                                 Either commit the column (move it before n_committed_columns) \
+                                 or use LOGUP* with a helper commitment.",
+                                table.name(), col, n_committed,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shift_columns_are_committed() {
+        for table in ALL_TABLES {
+            let n_shift = table.n_shift_columns();
+            let n_committed = table.n_committed_columns();
+            assert!(
+                n_shift <= n_committed,
+                "table {}: n_shift_columns ({}) > n_committed_columns ({}). \
+                 Shift columns must be committed for WHIR opening at the next-row point.",
+                table.name(), n_shift, n_committed,
+            );
+        }
+    }
 }
