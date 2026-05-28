@@ -73,6 +73,15 @@ pub fn verify_execution(
     )?;
 
     let logup_c = verifier_state.sample();
+
+    // LOGUP* eq point for bytecode binding (must match prover's sampling)
+    let exec_table = Table::execution();
+    if exec_table.bytecode_bound_columns().is_some() {
+        let exec_max_log_n = max_log_n_rows_per_table(&exec_table);
+        verifier_state.duplex();
+        let _logup_star_r: Vec<EF> = verifier_state.sample_vec(exec_max_log_n);
+    }
+
     verifier_state.duplex();
     let logup_alphas = verifier_state.sample_vec(LOG_MAX_BUS_WIDTH);
     let logup_alphas_eq_poly = eval_eq(&logup_alphas);

@@ -135,6 +135,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
 
     fs, logup_c = fs_sample_ef(fs)
 
+    # LOGUP* eq point for bytecode binding (eprint 2025/946)
+    fs = fs_duplex(fs)
+    fs, logup_star_r = fs_sample_many_ef(fs, MAX_LOG_N_ROWS_PER_TABLE[EXECUTION_TABLE_INDEX])
+
     fs = fs_duplex(fs)
     fs, logup_alphas = fs_sample_many_ef(fs, log2_ceil(MAX_BUS_WIDTH))
 

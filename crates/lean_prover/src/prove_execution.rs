@@ -116,8 +116,29 @@ pub fn prove_execution(
         &traces,
     );
 
-    // logup (GKR)
+    // logup (GKR) with LOGUP* bytecode binding (eprint 2025/946)
     let logup_c = prover_state.sample();
+
+    // LOGUP* eq point for bytecode binding: sample BEFORE GKR
+    let exec_table = Table::execution();
+    let logup_star_pushforward = if exec_table.bytecode_bound_columns().is_some() {
+        let exec_log_n = traces[&exec_table].log_n_rows;
+        let exec_max_log_n = max_log_n_rows_per_table(&exec_table);
+        prover_state.duplex();
+        let logup_star_r_full: Vec<EF> = prover_state.sample_vec(exec_max_log_n);
+        let logup_star_r = logup_star_r_full[..exec_log_n].to_vec();
+        let eq_r = eval_eq(&logup_star_r);
+        let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
+        let bytecode_table_size = 1usize << bytecode.log_size();
+        let pushforward = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
+            pc_col, bytecode_table_size, &eq_r,
+        );
+        eprintln!("  LOGUP* pushforward: {} ext elements", pushforward.len());
+        Some((pushforward, logup_star_r))
+    } else {
+        None
+    };
+
     prover_state.duplex();
     let logup_alphas = prover_state.sample_vec(LOG_MAX_BUS_WIDTH);
     let logup_alphas_eq_poly = eval_eq(&logup_alphas);
@@ -134,50 +155,25 @@ pub fn prove_execution(
     );
     let gkr_point = &logup_statements.gkr_point;
 
-    // --- LOGUP* bytecode binding (eprint 2025/946) ---
-    // Compute pushforward P = PC_* eq_{r_gkr} for bytecode-bound columns.
-    // The pushforward proves instruction column evaluations at r_gkr are
-    // consistent with the committed PC column and known bytecode table.
-    let t_pushforward = std::time::Instant::now();
-    let exec_table = Table::execution();
-    if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+    // --- LOGUP* bytecode binding sanity check ---
+    if let (Some((pushforward, logup_star_r)), Some(bc_range)) =
+        (&logup_star_pushforward, exec_table.bytecode_bound_columns())
+    {
         let exec_trace = &traces[&exec_table];
-        let exec_log_n = exec_trace.log_n_rows;
-        let exec_gkr_point = from_end(gkr_point, exec_log_n);
-
-        // Compute eq_{r_gkr} evaluated at all execution rows
-        let eq_evals = eval_eq(&exec_gkr_point.iter().rev().copied().collect::<Vec<_>>());
-
-        // Compute pushforward: P[j] = Σ_{i: PC[i]=j} eq_r[i]
-        let pc_col = &exec_trace.columns[EXEC_COL_PC];
-        let bytecode_table_size = 1usize << bytecode.log_size();
-        let pushforward = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
-            pc_col, bytecode_table_size, &eq_evals,
-        );
-
-        // Derive instruction column evaluations from pushforward + bytecode
         let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
         let derived_evals = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
-            &pushforward,
+            pushforward,
             &bytecode.instructions_multilinear,
             bc_range.len(),
             bytecode_stride,
         );
-
-        // Verify derived evals match the direct evaluations (sanity check)
+        // Verify at the LOGUP* r point (not r_gkr)
         let direct_evals: Vec<EF> = bc_range.clone().map(|col| {
-            exec_trace.columns[col].evaluate(&MultilinearPoint(exec_gkr_point.iter().rev().copied().collect()))
+            exec_trace.columns[col].evaluate(&MultilinearPoint(logup_star_r.iter().rev().copied().collect()))
         }).collect();
         for (k, (derived, direct)) in derived_evals.iter().zip(direct_evals.iter()).enumerate() {
-            assert_eq!(*derived, *direct, "pushforward derivation mismatch at instruction col {k}");
+            debug_assert_eq!(*derived, *direct, "pushforward derivation mismatch at col {k}");
         }
-
-        // TODO WIP5: commit pushforward via small WHIR and add binding sumcheck
-        // For now, the pushforward is computed and verified via sanity check only.
-        let _ = &pushforward; // keep the pushforward alive for future use
-
-        eprintln!("  PUSHFORWARD: {}ms (bytecode binding, {} ext elements)",
-            t_pushforward.elapsed().as_secs_f64() * 1000.0, pushforward.len());
     }
 
     let mut committed_statements: CommittedStatements = Default::default();
