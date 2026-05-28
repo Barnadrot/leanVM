@@ -77,6 +77,57 @@ pub fn prove_gkr_quotient<'a, EF: ExtensionField<PF<EF>>>(
     (quotient, point)
 }
 
+/// GKR quotient with extension-field numerators (for LOGUP* pushforward binding).
+/// Starts from PackedBr layer directly, bypassing the Initial (base-field) phase.
+#[instrument(skip_all, name = "prove GKR (ext nums)")]
+pub fn prove_gkr_quotient_ext<'a, EF: ExtensionField<PF<EF>>>(
+    prover_state: &mut impl FSProver<EF>,
+    nums_br: &'a [EFPacking<EF>],
+    dens_br: &'a [EFPacking<EF>],
+    pivot: usize,
+) -> (EF, MultilinearPoint<EF>) {
+    let w = packing_log_width::<EF>();
+    let total_n_vars = log2_ceil_usize(nums_br.len()) + w;
+    assert!(total_n_vars > N_VARS_TO_SEND_GKR_COEFFS);
+    assert!(pivot > w && total_n_vars > w);
+    assert_eq!(nums_br.len(), dens_br.len());
+
+    let initial = LayerStorage::PackedBr {
+        nums: Cow::Borrowed(nums_br),
+        dens: Cow::Borrowed(dens_br),
+        chunk_log: pivot,
+    };
+
+    let mut layers: Vec<LayerStorage<'a, EF>> = vec![initial];
+
+    let mut current_n_vars = total_n_vars;
+    while current_n_vars > N_VARS_TO_SEND_GKR_COEFFS {
+        let last_layer = layers.last().unwrap();
+        if last_layer.chunk_log() == w {
+            let last_layer_unreversed = last_layer.convert_to_natural();
+            layers.push(last_layer_unreversed.sum_quotients_2_by_2());
+        } else {
+            layers.push(last_layer.sum_quotients_2_by_2());
+        }
+        current_n_vars -= 1;
+    }
+
+    let (top_nums, top_dens) = layers.pop().unwrap().materialise_in_full();
+    prover_state.add_extension_scalars(&top_nums);
+    prover_state.add_extension_scalars(&top_dens);
+    let quotient = compute_quotient(&top_nums, &top_dens).expect("prover produced a zero denominator");
+
+    let mut point = MultilinearPoint(prover_state.sample_vec(N_VARS_TO_SEND_GKR_COEFFS));
+    let mut claim_num = top_nums.evaluate(&point);
+    let mut claim_den = top_dens.evaluate(&point);
+
+    for layer in layers.iter().rev() {
+        (point, claim_num, claim_den) = prove_gkr_layer(prover_state, layer, &point, claim_num, claim_den);
+    }
+
+    (quotient, point)
+}
+
 fn prove_gkr_layer<EF: ExtensionField<PF<EF>>>(
     prover_state: &mut impl FSProver<EF>,
     layer: &LayerStorage<'_, EF>,
