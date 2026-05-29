@@ -84,24 +84,38 @@ pub fn compute_q_lo_d2(
                     if h < s { eq_r[i] * eq_s_hi[h] } else { EF::ZERO }
                 })
                 .collect();
-            let gamma_base = gamma_power;
             let mut gamma_powers_k = Vec::with_capacity(n_values);
             for _ in 0..n_values {
                 gamma_powers_k.push(gamma_power);
                 gamma_power *= gamma;
             }
-            for (i, &addr) in addr_col.iter().enumerate() {
-                if weighted[i].is_zero() { continue; }
-                let lo = addr.to_usize() & (s - 1);
-                let w = weighted[i];
-                for k in 0..n_values {
-                    let target = lo + k;
-                    if target < s {
-                        q_lo[target] += gamma_powers_k[k] * w;
+            let chunk_size = 4096.max(addr_col.len() / rayon::current_num_threads());
+            let partial_q_los: Vec<Vec<EF>> = addr_col
+                .par_chunks(chunk_size)
+                .enumerate()
+                .map(|(chunk_idx, chunk)| {
+                    let mut local_q = EF::zero_vec(s);
+                    let base = chunk_idx * chunk_size;
+                    for (ci, &addr) in chunk.iter().enumerate() {
+                        let i = base + ci;
+                        let w = weighted[i];
+                        if w.is_zero() { continue; }
+                        let lo = addr.to_usize() & (s - 1);
+                        for k in 0..n_values {
+                            let target = lo + k;
+                            if target < s {
+                                local_q[target] += gamma_powers_k[k] * w;
+                            }
+                        }
                     }
+                    local_q
+                })
+                .collect();
+            for partial in &partial_q_los {
+                for j in 0..s {
+                    q_lo[j] += partial[j];
                 }
             }
-            let _ = gamma_base;
         }
     }
     q_lo
