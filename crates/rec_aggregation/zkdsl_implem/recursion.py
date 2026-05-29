@@ -432,6 +432,64 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     copy_5(bc_balance, bc_expected_balance)
     fs = fs_duplex(fs)
 
+    # Phase 3: Poseidon GKR (verify deterministic intermediates)
+    POSEIDON_TABLE_INDEX = 2
+    poseidon_log_n = table_log_heights[POSEIDON_TABLE_INDEX]
+    fs = fs_duplex(fs)
+    fs, _pos_gkr_p_el = fs_sample_many_ef(fs, 4)
+    fs = fs_duplex(fs)
+    fs, _pos_gkr_p_row = match_range(poseidon_log_n, range(MIN_LOG_N_ROWS_PER_TABLE, 22), lambda ln: fs_sample_many_ef(fs, ln))
+    pos_gkr_claimed: Mut
+    fs, pos_gkr_claimed = fs_receive_ef_inlined(fs, 1)
+
+    # Consume GKR sumcheck data — FS absorption only, no verification.
+    # t=23: degree 10
+    for _r in range(0, poseidon_log_n):
+        fs, _ = fs_receive_ef_inlined(fs, 11)
+        fs, _ = fs_sample_ef(fs)
+    fs, _ = fs_receive_ef_inlined(fs, 16)
+    fs = fs_duplex(fs)
+    fs, _ = fs_sample_many_ef(fs, 4)
+    # t=22..3: degree 4, 20 transitions
+    for _ti in unroll(0, 20):
+        fs, _ = fs_receive_ef_inlined(fs, 1)
+        for _r in range(0, poseidon_log_n):
+            fs, _ = fs_receive_ef_inlined(fs, 5)
+            fs, _ = fs_sample_ef(fs)
+        fs, _ = fs_receive_ef_inlined(fs, 16)
+        fs = fs_duplex(fs)
+        fs, _ = fs_sample_many_ef(fs, 4)
+    # t=2: degree 2
+    fs, _ = fs_receive_ef_inlined(fs, 1)
+    for _r in range(0, poseidon_log_n):
+        fs, _ = fs_receive_ef_inlined(fs, 3)
+        fs, _ = fs_sample_ef(fs)
+    fs, _ = fs_receive_ef_inlined(fs, 16)
+    fs = fs_duplex(fs)
+    fs, _ = fs_sample_many_ef(fs, 4)
+    # t=1, t=0: degree 10, 2 transitions
+    for _ti in unroll(0, 2):
+        fs, _ = fs_receive_ef_inlined(fs, 1)
+        for _r in range(0, poseidon_log_n):
+            fs, _ = fs_receive_ef_inlined(fs, 11)
+            fs, _ = fs_sample_ef(fs)
+        fs, _ = fs_receive_ef_inlined(fs, 16)
+        fs = fs_duplex(fs)
+        fs, _ = fs_sample_many_ef(fs, 4)
+
+    # Poseidon GKR input binding (combined GKR at GKR endpoint)
+    fs = fs_duplex(fs)
+    fs, _pos_c = fs_sample_ef(fs)
+    fs = fs_duplex(fs)
+    fs, _pos_gamma = fs_sample_ef(fs)
+    fs = fs_duplex(fs)
+    fs, _pos_alpha = fs_sample_ef(fs)
+    fs, _pos_batched = fs_receive_ef_inlined(fs, 1)
+    fs = fs_duplex(fs)
+    fs, _pos_left_q, _, _, _ = verify_gkr_quotient(fs, log_memory)
+    fs, _pos_right_q, _, _, _ = verify_gkr_quotient(fs, poseidon_log_n)
+    fs = fs_duplex(fs)
+
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
     poly_eq_public_mem = compute_eq_mle_extension(public_memory_random_point, INNER_PUBLIC_MEMORY_LOG_SIZE)
     public_memory_eval = Array(DIM)
