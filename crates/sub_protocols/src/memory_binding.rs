@@ -7,20 +7,31 @@ use utils::ToUsize;
 pub struct MemoryBindingGroup {
     pub addr_col: usize,
     pub value_cols: Vec<usize>,
+    pub shout_lo_col: usize,
+    pub shout_hi_col: usize,
 }
 
 pub fn memory_binding_groups(table: &Table) -> Vec<MemoryBindingGroup> {
     let n_committed = table.n_committed_columns();
     let buses = table.bus_interactions();
     let groups = memory_lookup_groups(&buses);
-    groups
-        .into_iter()
-        .filter(|g| g.value_cols.iter().any(|&c| c >= n_committed))
-        .map(|g| MemoryBindingGroup {
-            addr_col: g.idx_col,
-            value_cols: g.value_cols,
-        })
-        .collect()
+    let shout_cols = table.memory_shout_columns();
+    let mut binding_groups = Vec::new();
+    let mut shout_idx = 0;
+    for g in groups {
+        let has_virtual = g.value_cols.iter().any(|&c| c >= n_committed);
+        if has_virtual {
+            let (lo, hi) = shout_cols[shout_idx];
+            binding_groups.push(MemoryBindingGroup {
+                addr_col: g.idx_col,
+                value_cols: g.value_cols,
+                shout_lo_col: lo,
+                shout_hi_col: hi,
+            });
+        }
+        shout_idx += 1;
+    }
+    binding_groups
 }
 
 pub fn compute_pushforward_hi(

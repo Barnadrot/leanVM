@@ -25,8 +25,8 @@ pub fn prove_execution(
 ) -> Result<ExecutionProof, ProverError> {
     check_rate(whir_config.starting_log_inv_rate).map_err(|_| ProverError::InvalidRate)?;
     let ExecutionTrace {
-        traces,
-        mut memory, // padded with zeros to next power of two
+        mut traces,
+        mut memory,
         metadata,
     } = info_span!("Witness generation").in_scope(|| -> Result<_, ProverError> {
         let execution_result = info_span!("Executing bytecode")
@@ -104,6 +104,15 @@ pub fn prove_execution(
             bytecode_acc[pc.to_usize()] += F::ONE;
         }
     });
+
+    // Fill d=2 Shout address decomposition columns (depends on final memory size)
+    let log_memory = log2_strict_usize(memory.len());
+    {
+        let poseidon_trace = traces.get_mut(&Table::poseidon16()).unwrap();
+        fill_shout_decomposition_poseidon_16(&mut poseidon_trace.columns, log_memory);
+        let ext_trace = traces.get_mut(&Table::extension_op()).unwrap();
+        fill_shout_decomposition_extension_op(&mut ext_trace.columns, log_memory);
+    }
 
     // 1st Commitment
     let stacked_pcs_witness = stack_polynomials_and_commit(

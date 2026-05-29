@@ -102,6 +102,9 @@ impl Air for Table {
     fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
         delegate_to_inner!(self, memory_bound_columns)
     }
+    fn memory_shout_columns(&self) -> Vec<(usize, usize)> {
+        delegate_to_inner!(self, memory_shout_columns)
+    }
     fn n_constraints(&self) -> usize {
         delegate_to_inner!(self, n_constraints)
     }

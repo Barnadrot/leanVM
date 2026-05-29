@@ -4,7 +4,7 @@ use backend::*;
 mod air;
 use air::*;
 mod exec;
-pub use exec::fill_trace_extension_op;
+pub use exec::{fill_trace_extension_op, fill_shout_decomposition_extension_op};
 
 // aux_2 encoding: see `tables/mod.rs`.
 pub(crate) const EXT_OP_FLAG_BE: usize = 4;

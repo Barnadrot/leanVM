@@ -42,6 +42,12 @@ pub trait Air: Send + Sync + 'static {
         vec![]
     }
 
+    /// d=2 Shout address decomposition: (shout_lo_col, shout_hi_col) for each memory binding group.
+    /// Must match the order of groups returned by memory_bound_columns().
+    fn memory_shout_columns(&self) -> Vec<(usize, usize)> {
+        vec![]
+    }
+
     /// If the AIR contains a `low_degree_block` sub-region, returns `(degree, n_constraints)`
     fn low_degree_air(&self) -> Option<(usize, usize)> {
         None

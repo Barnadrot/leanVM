@@ -18,16 +18,21 @@ pub(super) const COL_IDX_B: usize = 7;
 pub(super) const COL_ACC: usize = 8;
 // --- flat-only columns ---
 pub(super) const COL_IDX_RES: usize = 13;
+// d=2 Shout address decomposition (3 groups: idx_a, idx_b, idx_res)
+pub const N_EXTENSION_MEMORY_GROUPS: usize = 3;
+pub(super) const COL_SHOUT_LO_EXT_START: usize = 14;
+pub(super) const COL_SHOUT_HI_EXT_START: usize = 14 + N_EXTENSION_MEMORY_GROUPS;
+const N_COMMITTED_EXTENSION: usize = COL_SHOUT_HI_EXT_START + N_EXTENSION_MEMORY_GROUPS; // = 20
 /// v_A coordinates (5 columns).
-pub(super) const COL_V_A: usize = 14;
+pub(super) const COL_V_A: usize = N_COMMITTED_EXTENSION;
 /// v_B coordinates (5 columns).
-pub(super) const COL_V_B: usize = 19;
+pub(super) const COL_V_B: usize = N_COMMITTED_EXTENSION + 5;
 /// res coordinates (5 columns).
-pub(super) const COL_RES: usize = 24;
+pub(super) const COL_RES: usize = N_COMMITTED_EXTENSION + 10;
 
 // Virtual columns (not explicitely in AIR)
-pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = 29;
-pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = 30;
+pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = N_COMMITTED_EXTENSION + 15;
+pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = N_COMMITTED_EXTENSION + 16;
 
 use backend::quintic_extension::extension::quintic_mul;
 
@@ -42,10 +47,10 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
 
     fn n_columns(&self) -> usize {
-        29
+        N_COMMITTED_EXTENSION + 15 // 20 committed + 15 virtual (v_a + v_b + res)
     }
     fn n_committed_columns(&self) -> usize {
-        COL_IDX_RES + 1
+        N_COMMITTED_EXTENSION
     }
     fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
         vec![
@@ -53,6 +58,11 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
             (COL_IDX_B, COL_V_B..COL_V_B + crate::DIMENSION),
             (COL_IDX_RES, COL_RES..COL_RES + crate::DIMENSION),
         ]
+    }
+    fn memory_shout_columns(&self) -> Vec<(usize, usize)> {
+        (0..N_EXTENSION_MEMORY_GROUPS)
+            .map(|g| (COL_SHOUT_LO_EXT_START + g, COL_SHOUT_HI_EXT_START + g))
+            .collect()
     }
     fn degree_air(&self) -> usize {
         6
