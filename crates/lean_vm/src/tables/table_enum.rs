@@ -189,22 +189,17 @@ mod tests {
                         // Multiplicity::One bus: column evaluations at the GKR
                         // point become WHIR opening claims. PCS binding is
                         // required for input consistency between AIR and LOGUP.
-                        // Exceptions:
-                        // - bytecode_bound_columns: bound via LOGUP* pushforward
-                        //   (eprint 2025/946)
-                        // - memory lookup value columns: bound via Shout protocol
-                        //   (Wiese, "Twist and Shout via logup*", §5.1)
+                        // Exception: bytecode_bound_columns are bound via
+                        // LOGUP* pushforward (eprint 2025/946).
                         let bc_bound = table.bytecode_bound_columns();
-                        let is_memory_bus = bus.is_memory_lookup();
                         for &col in &bus_cols {
                             let is_bytecode_bound =
                                 bc_bound.as_ref().is_some_and(|range| range.contains(&col));
-                            let is_memory_value = is_memory_bus && col >= n_committed;
                             assert!(
-                                col < n_committed || is_bytecode_bound || is_memory_value,
+                                col < n_committed || is_bytecode_bound,
                                 "SOUNDNESS: table {}: Multiplicity::One bus references col {} \
                                  which is outside the committed range [0, {}) and not \
-                                 bytecode-bound or memory-bound.",
+                                 bytecode-bound.",
                                 table.name(),
                                 col,
                                 n_committed,

@@ -104,13 +104,11 @@ pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 4;
 pub const POSEIDON_COL_INPUT_START: ColIndex = 5;
 pub const POSEIDON_COL_OUT_LO: ColIndex = 5 + WIDTH;
 pub const POSEIDON_COL_OUT_HI: ColIndex = 5 + WIDTH + WIDTH / 2;
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 5;
-// virtual control columns (not bus-referenced, AIR-only)
-// These are at FIXED struct positions after out_hi, independent of N_COMMITTED
-pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5 + WIDTH + WIDTH + 0; // = 37
-pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 5 + WIDTH + WIDTH + 1;  // = 38
-pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 5 + WIDTH + WIDTH + 2; // = 39
-pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 5 + WIDTH + WIDTH + 3; // = 40
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 5 + WIDTH + WIDTH; // = 37: addr/ctrl + inputs + outputs
+pub const POSEIDON_COL_FLAG_SHORT: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
+pub const POSEIDON_COL_FLAG_LEFT: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 1;
+pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 2;
+pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + 3;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
