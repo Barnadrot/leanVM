@@ -478,6 +478,54 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             (MAX_LOG_MEMORY_SIZE / 2).to_string(),
         );
     }
+    // Poseidon GKR constants
+    {
+        let fmt_arr = |arr: &[F]| -> String {
+            format!("[{}]", arr.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
+        };
+        let fmt_mat = |mat: &[[F; 16]; 16]| -> String {
+            format!("[{}]", mat.iter().map(|row| fmt_arr(row)).collect::<Vec<_>>().join(", "))
+        };
+        let initial_rc = poseidon1_initial_constants();
+        let final_rc = poseidon1_final_constants();
+        let frc = poseidon1_sparse_first_round_constants();
+        let m_i = poseidon1_sparse_m_i();
+        let first_rows = poseidon1_sparse_first_row();
+        let v_vecs = poseidon1_sparse_v();
+        let scalar_rc = poseidon1_sparse_scalar_round_constants();
+
+        // Compute dense MDS matrix
+        let mds: [[F; 16]; 16] = {
+            let mut mat = [[F::ZERO; 16]; 16];
+            for j in 0..16 {
+                let mut e = [F::ZERO; 16];
+                e[j] = F::ONE;
+                mds_circ_16(&mut e);
+                for i in 0..16 { mat[i][j] = e[i]; }
+            }
+            mat
+        };
+
+        let mds_flat: Vec<F> = mds.iter().flat_map(|r| r.iter().copied()).collect();
+        replacements.insert("POSEIDON_MDS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&mds_flat));
+        let m_i_flat: Vec<F> = m_i.iter().flat_map(|r| r.iter().copied()).collect();
+        replacements.insert("POSEIDON_M_I_FLAT_PLACEHOLDER".to_string(), fmt_arr(&m_i_flat));
+        // Flatten round constants: POSEIDON_INITIAL_RC_0 = [16 values], etc.
+        for (i, rc) in initial_rc.iter().enumerate() {
+            replacements.insert(format!("POSEIDON_INITIAL_RC_{i}_PLACEHOLDER"), fmt_arr(rc));
+        }
+        for (i, rc) in final_rc.iter().enumerate() {
+            replacements.insert(format!("POSEIDON_FINAL_RC_{i}_PLACEHOLDER"), fmt_arr(rc));
+        }
+        replacements.insert("POSEIDON_FRC_PLACEHOLDER".to_string(), fmt_arr(frc));
+        // Flatten first_rows and v_vecs into 1D arrays (20 rounds × 16 elements)
+        let first_rows_flat: Vec<F> = first_rows.iter().flat_map(|r| r.iter().copied()).collect();
+        replacements.insert("POSEIDON_FIRST_ROWS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&first_rows_flat));
+        let v_vecs_flat: Vec<F> = v_vecs.iter().flat_map(|v| v.iter().copied()).collect();
+        replacements.insert("POSEIDON_V_VECS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&v_vecs_flat));
+        replacements.insert("POSEIDON_SCALAR_RC_PLACEHOLDER".to_string(),
+            format!("[{}]", scalar_rc.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")));
+    }
     replacements.insert("STARTING_PC_PLACEHOLDER".to_string(), STARTING_PC.to_string());
     replacements.insert("ENDING_PC_PLACEHOLDER".to_string(), ending_pc.to_string());
 
