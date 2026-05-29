@@ -245,6 +245,34 @@ pub fn prove_execution(
         let log_memory = log2_strict_usize(memory_size);
         let t_bind = std::time::Instant::now();
 
+        let w = packing_width::<EF>();
+        let pack_ef = |data: &[EF]| -> Vec<EFPacking<EF>> {
+            data.chunks_exact(w)
+                .map(|chunk| {
+                    let mut acc = EFPacking::<EF>::ZERO;
+                    for (lane, &val) in chunk.iter().enumerate() {
+                        let mut basis = [F::ZERO; 4];
+                        basis[lane] = F::ONE;
+                        acc += EFPacking::<EF>::from(val) * EFPacking::<EF>::from(PFPacking::<EF>::from_fn(|l| basis[l]));
+                    }
+                    acc
+                })
+                .collect()
+        };
+        let br_packed = |data: &[EFPacking<EF>], piv: usize| -> Vec<EFPacking<EF>> {
+            let packed_len = data.len();
+            let chunk_packed = 1usize << (piv - packing_log_width::<EF>());
+            let shift = usize::BITS as usize - (piv - packing_log_width::<EF>());
+            let mut out = vec![EFPacking::<EF>::ZERO; packed_len];
+            for (c_idx, chunk) in data.chunks(chunk_packed).enumerate() {
+                for (i, &val) in chunk.iter().enumerate() {
+                    let br_i = i.reverse_bits() >> shift;
+                    out[c_idx * chunk_packed + br_i] = val;
+                }
+            }
+            out
+        };
+
         // --- V-4: Memory-bound value columns ---
         let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
         let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
@@ -301,7 +329,6 @@ pub fn prove_execution(
             // nums[j] = P[j] * (alpha * memory[j] * (c-j) + 1)
             // dens[j] = (c - j)
             // total = alpha * <P, memory> + Σ P[j]/(c-j)
-            let w = packing_width::<EF>();
             let pivot = ENDIANNESS_PIVOT_GKR.min(log_memory);
             let combined_nums: Vec<EF> = (0..memory_size)
                 .map(|j| p_batched[j] * (alpha_bind * EF::from(memory[j]) * (c_bind - EF::from_usize(j)) + EF::ONE))
@@ -310,35 +337,8 @@ pub fn prove_execution(
                 .map(|j| c_bind - EF::from_usize(j))
                 .collect();
 
-            let pack_ef = |data: &[EF]| -> Vec<EFPacking<EF>> {
-                data.chunks_exact(w)
-                    .map(|chunk| {
-                        let mut acc = EFPacking::<EF>::ZERO;
-                        for (lane, &val) in chunk.iter().enumerate() {
-                            let mut basis = [F::ZERO; 4];
-                            basis[lane] = F::ONE;
-                            acc += EFPacking::<EF>::from(val) * EFPacking::<EF>::from(PFPacking::<EF>::from_fn(|l| basis[l]));
-                        }
-                        acc
-                    })
-                    .collect()
-            };
             let nums_packed = pack_ef(&combined_nums);
             let dens_packed = pack_ef(&combined_dens);
-
-            let br_packed = |data: &[EFPacking<EF>], piv: usize| -> Vec<EFPacking<EF>> {
-                let packed_len = data.len();
-                let chunk_packed = 1usize << (piv - packing_log_width::<EF>());
-                let shift = usize::BITS as usize - (piv - packing_log_width::<EF>());
-                let mut out = vec![EFPacking::<EF>::ZERO; packed_len];
-                for (c_idx, chunk) in data.chunks(chunk_packed).enumerate() {
-                    for (i, &val) in chunk.iter().enumerate() {
-                        let br_i = i.reverse_bits() >> shift;
-                        out[c_idx * chunk_packed + br_i] = val;
-                    }
-                }
-                out
-            };
             let nums_br = br_packed(&nums_packed, pivot);
             let dens_br = br_packed(&dens_packed, pivot);
 
@@ -398,7 +398,7 @@ pub fn prove_execution(
             None
         };
 
-        // --- V-3: Bytecode-bound instruction columns ---
+        // --- V-3: Bytecode-bound instruction columns (combined GKR) ---
         let exec_table = Table::execution();
         if let Some(bc_range) = exec_table.bytecode_bound_columns() {
             let exec_log_n = traces[&exec_table].log_n_rows;
@@ -406,30 +406,72 @@ pub fn prove_execution(
             let eq_r_exec = eval_eq(&r_air_exec);
             let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
             let bytecode_table_size = 1usize << bytecode.log_size();
+            let log_bytecode = bytecode.log_size();
             let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+
+            prover_state.duplex();
+            let c_bc: EF = prover_state.sample();
+            prover_state.duplex();
+            let gamma_bc: EF = prover_state.sample();
+            prover_state.duplex();
+            let alpha_bc: EF = prover_state.sample();
 
             let pushforward_bc = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
                 pc_col, bytecode_table_size, &eq_r_exec,
             );
-            prover_state.add_extension_scalars(&pushforward_bc);
 
-            prover_state.duplex();
-            let c_bc: EF = prover_state.sample();
-            let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
-                &mut prover_state, &eq_r_exec, pc_col, &pushforward_bc, c_bc,
+            let batched_bytecode = sub_protocols::bytecode_binding::compute_batched_bytecode::<EF>(
+                &bytecode.instructions_multilinear, bytecode_table_size,
+                bytecode_stride, bc_range.len(), &gamma_bc.powers().collect_n(bc_range.len()),
             );
-            debug_assert!((left.0 + right.0).is_zero());
-            prover_state.duplex();
 
-            let derived = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
-                &pushforward_bc, &bytecode.instructions_multilinear,
-                bc_range.len(), bytecode_stride,
-            );
+            let batched_instr_val: EF = pushforward_bc.iter().zip(batched_bytecode.iter())
+                .map(|(&p, &b)| p * b).sum();
             let col_evals = &table_col_evals[&exec_table];
-            for (k, &derived_k) in derived.iter().enumerate() {
-                debug_assert_eq!(derived_k, col_evals[bc_range.start + k],
-                    "bytecode-derived instr_{k} must match col_evals");
+            let mut expected_bc_val = EF::ZERO;
+            let mut gp_bc = EF::ONE;
+            for k in 0..bc_range.len() {
+                expected_bc_val += gp_bc * col_evals[bc_range.start + k];
+                gp_bc *= gamma_bc;
             }
+            debug_assert_eq!(batched_instr_val, expected_bc_val,
+                "bytecode batched_instr_val must match col_evals");
+            prover_state.add_extension_scalar(batched_instr_val);
+
+            // Left combined GKR: α*<P_bc, batched_bytecode> + Σ P_bc/(c-j)
+            let bc_nums: Vec<EF> = (0..bytecode_table_size)
+                .map(|j| pushforward_bc[j] * (alpha_bc * batched_bytecode[j] * (c_bc - EF::from_usize(j)) + EF::ONE))
+                .collect();
+            let bc_dens: Vec<EF> = (0..bytecode_table_size)
+                .map(|j| c_bc - EF::from_usize(j))
+                .collect();
+            let pivot_bc = ENDIANNESS_PIVOT_GKR.min(log_bytecode);
+            let bc_nums_packed = pack_ef(&bc_nums);
+            let bc_dens_packed = pack_ef(&bc_dens);
+            let bc_nums_br = br_packed(&bc_nums_packed, pivot_bc);
+            let bc_dens_br = br_packed(&bc_dens_packed, pivot_bc);
+
+            prover_state.duplex();
+            let bc_left = prove_gkr_quotient_ext(&mut prover_state, &bc_nums_br, &bc_dens_br, pivot_bc);
+
+            // Right: trace side
+            let bc_right_nums: Vec<EF> = eq_r_exec.clone();
+            let bc_right_dens: Vec<EF> = pc_col.iter()
+                .map(|&pc| c_bc - EF::from(pc))
+                .collect();
+            let pivot_bc_right = ENDIANNESS_PIVOT_GKR.min(exec_log_n);
+            let bc_right_nums_packed = pack_ef(&bc_right_nums);
+            let bc_right_dens_packed = pack_ef(&bc_right_dens);
+            let bc_right_nums_br = br_packed(&bc_right_nums_packed, pivot_bc_right);
+            let bc_right_dens_br = br_packed(&bc_right_dens_packed, pivot_bc_right);
+
+            let bc_right = prove_gkr_quotient_ext(
+                &mut prover_state, &bc_right_nums_br, &bc_right_dens_br, pivot_bc_right,
+            );
+
+            debug_assert!((bc_left.0 - bc_right.0 - alpha_bc * batched_instr_val).is_zero(),
+                "bytecode combined GKR balance failed");
+            prover_state.duplex();
         }
 
         eprintln!(

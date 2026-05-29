@@ -238,33 +238,36 @@ pub fn verify_execution(
             None
         };
 
-        // --- V-3: Bytecode-bound instruction columns ---
+        // --- V-3: Bytecode-bound instruction columns (combined GKR) ---
         let exec_table = Table::execution();
         if let Some(bc_range) = exec_table.bytecode_bound_columns() {
-            let bytecode_table_size = 1usize << bytecode.log_size();
-            let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+            verifier_state.duplex();
+            let _c_bc: EF = verifier_state.sample();
+            verifier_state.duplex();
+            let gamma_bc: EF = verifier_state.sample();
+            verifier_state.duplex();
+            let alpha_bc: EF = verifier_state.sample();
 
-            let pushforward_bc = verifier_state.next_extension_scalars_vec(bytecode_table_size)?;
+            let batched_instr_val = verifier_state.next_extension_scalar()?;
+
+            let col_evals = &table_col_evals[&exec_table];
+            let mut expected_bc_val = EF::ZERO;
+            let mut gp_bc = EF::ONE;
+            for k in 0..bc_range.len() {
+                expected_bc_val += gp_bc * col_evals[bc_range.start + k];
+                gp_bc *= gamma_bc;
+            }
+            if expected_bc_val != batched_instr_val {
+                return Err(ProofError::InvalidProof);
+            }
 
             verifier_state.duplex();
-            let c_bc: EF = verifier_state.sample();
-            let left = verify_gkr_quotient(&mut verifier_state, table_n_vars[&exec_table])?;
-            let right = verify_gkr_quotient(&mut verifier_state, bytecode.log_size())?;
-            if !(left.0 + right.0).is_zero() {
+            let bc_left = verify_gkr_quotient(&mut verifier_state, bytecode.log_size())?;
+            let bc_right = verify_gkr_quotient(&mut verifier_state, table_n_vars[&exec_table])?;
+            if !(bc_left.0 - bc_right.0 - alpha_bc * batched_instr_val).is_zero() {
                 return Err(ProofError::InvalidProof);
             }
             verifier_state.duplex();
-
-            let derived = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
-                &pushforward_bc, &bytecode.instructions_multilinear,
-                bc_range.len(), bytecode_stride,
-            );
-            let col_evals = &table_col_evals[&exec_table];
-            for (k, &derived_k) in derived.iter().enumerate() {
-                if derived_k != col_evals[bc_range.start + k] {
-                    return Err(ProofError::InvalidProof);
-                }
-            }
         }
 
         mem_stmt

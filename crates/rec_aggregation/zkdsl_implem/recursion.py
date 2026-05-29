@@ -140,10 +140,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
 
     fs, logup_c = fs_sample_ef(fs)
 
-    # LOGUP* eq point for bytecode binding (eprint 2025/946)
-    fs = fs_duplex(fs)
-    fs, logup_star_r = fs_sample_many_ef(fs, MAX_LOG_N_ROWS_PER_TABLE[EXECUTION_TABLE_INDEX])
-
     fs = fs_duplex(fs)
     fs, logup_alphas = fs_sample_many_ef(fs, log2_ceil(MAX_BUS_WIDTH))
 
@@ -308,60 +304,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
 
     # END OF LOGUP
 
-    # LOGUP* binding GKR (eprint 2025/946)
-    fs = fs_duplex(fs)
-    # Left: execution table (n_vars = log_n_cycles)
-    fs, binding_left_q, binding_left_point, _, _ = verify_gkr_quotient(fs, log_n_cycles)
-    fs, binding_right_q, binding_right_point, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
-    binding_sum = add_extension_ret(binding_left_q, binding_right_q)
-    set_to_5_zeros(binding_sum)
-    fs = fs_duplex(fs)
-
-    # Memory Shout binding d=2 (Wiese, "Twist and Shout via logup*", §5.1)
-    mem_bind_memory_eval: Mut = ZERO_VEC_PTR
-    mem_bind_full_point: Mut = ZERO_VEC_PTR
-    if N_MEM_BIND_GROUPS_TOTAL != 0:
-        half_bits = log_memory / 2
-        fs = fs_duplex(fs)
-
-        # Read P_hi per group (committed via absorption)
-        for table_index in unroll(0, N_TABLES):
-            for _g in unroll(0, N_MEM_BIND_GROUPS_PER_TABLE[table_index]):
-                fs, _p_hi = fs_receive_ef_by_log_dynamic(fs, half_bits, MIN_LOG_MEMORY_SIZE / 2, MEM_BIND_HALF_BITS_MAX + 1)
-
-        fs = fs_duplex(fs)
-        mem_bind_s_hi: Imm
-        fs, mem_bind_s_hi = match_range(
-            half_bits,
-            range(MIN_LOG_MEMORY_SIZE / 2, MEM_BIND_HALF_BITS_MAX + 1),
-            lambda hb: fs_sample_many_ef(fs, hb),
-        )
-        fs = fs_duplex(fs)
-        fs, mem_bind_gamma = fs_sample_ef(fs)
-
-        fs, mem_bind_weighted_val = fs_receive_ef_inlined(fs, 1)
-
-        # Product sumcheck with dynamic half_bits rounds
-        mem_bind_challenges = Array(half_bits * DIM)
-        mem_bind_final_sum: Imm
-        fs, mem_bind_final_sum = match_range(
-            half_bits,
-            range(MIN_LOG_MEMORY_SIZE / 2, MEM_BIND_HALF_BITS_MAX + 1),
-            lambda hb: sumcheck_verify_helper(fs, hb, mem_bind_weighted_val, 2, mem_bind_challenges),
-        )
-        fs, mem_bind_q_lo_eval = fs_receive_ef_inlined(fs, 1)
-        fs, mem_bind_memory_eval = fs_receive_ef_inlined(fs, 1)
-        check_product = mul_extension_ret(mem_bind_q_lo_eval, mem_bind_memory_eval)
-        copy_5(check_product, mem_bind_final_sum)
-
-        # Full memory point = s_hi || s_lo (for WHIR claim)
-        mem_bind_full_point = Array(log_memory * DIM)
-        for i in range(0, half_bits):
-            copy_5(mem_bind_s_hi + i * DIM, mem_bind_full_point + i * DIM)
-        for i in range(0, half_bits):
-            copy_5(mem_bind_challenges + i * DIM, mem_bind_full_point + (half_bits + i) * DIM)
-        fs = fs_duplex(fs)
-
     # VERIFY BUS AND AIR — back-loaded batched sumcheck
 
     fs, air_alpha = fs_sample_ef(fs)
@@ -422,6 +364,74 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     # verify that the AIR-batched sumcheck is valid
     copy_5(check_sum, batched_air_final_value)
 
+    # --- Post-AIR binding: combined GKR-product sumcheck (V-3 + V-4) ---
+    if N_MEM_BIND_GROUPS_TOTAL != 0:
+        fs = fs_duplex(fs)
+        fs, _c_bind = fs_sample_ef(fs)
+        fs = fs_duplex(fs)
+        fs, bind_gamma = fs_sample_ef(fs)
+        fs = fs_duplex(fs)
+        fs, bind_alpha = fs_sample_ef(fs)
+
+        fs, bind_batched_val = fs_receive_ef_inlined(fs, 1)
+
+        # Issue 1 check: batched_val matches column evaluations
+        expected_batched_val: Mut = ZERO_VEC_PTR
+        gamma_power: Mut = ONE_EF_PTR
+        for table_index in unroll(0, N_TABLES):
+            for vi in unroll(0, len(MEM_BIND_VALUE_COLS[table_index])):
+                val_col = MEM_BIND_VALUE_COLS[table_index][vi]
+                col_eval = pcs_vals_air[table_index * MAX_NUM_COLS_AIR + val_col]
+                expected_batched_val = add_extension_ret(expected_batched_val, mul_extension_ret(gamma_power, col_eval))
+                gamma_power = mul_extension_ret(gamma_power, bind_gamma)
+        copy_5(expected_batched_val, bind_batched_val)
+
+        # Left combined GKR: α*<P,memory> + Σ P/(c-j)
+        fs = fs_duplex(fs)
+        fs, bind_left_q, _, _, _ = verify_gkr_quotient(fs, log_memory)
+
+        # Right GKR(s): one per table with memory binding groups
+        bind_total_right: Mut = ZERO_VEC_PTR
+        for table_index in unroll(0, N_TABLES):
+            if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
+                log_n_rows = table_log_heights[table_index]
+                fs, bind_right_q, _, _, _ = verify_gkr_quotient(fs, log_n_rows)
+                bind_total_right = add_extension_ret(bind_total_right, bind_right_q)
+
+        # Balance: left - right = alpha * batched_val
+        bind_balance = sub_extension_ret(bind_left_q, bind_total_right)
+        bind_expected = mul_extension_ret(bind_alpha, bind_batched_val)
+        copy_5(bind_balance, bind_expected)
+
+        fs = fs_duplex(fs)
+
+    # V-3: Bytecode binding (combined GKR — zero pushforward absorption)
+    fs = fs_duplex(fs)
+    fs, _c_bc = fs_sample_ef(fs)
+    fs = fs_duplex(fs)
+    fs, bc_gamma = fs_sample_ef(fs)
+    fs = fs_duplex(fs)
+    fs, bc_alpha = fs_sample_ef(fs)
+
+    fs, bc_batched_val = fs_receive_ef_inlined(fs, 1)
+
+    # Check batched_instr_val matches col_evals
+    bc_expected: Mut = ZERO_VEC_PTR
+    bc_gp: Mut = ONE_EF_PTR
+    for ki in unroll(0, N_INSTRUCTION_COLUMNS):
+        col_eval = pcs_vals_air[EXECUTION_TABLE_INDEX * MAX_NUM_COLS_AIR + N_COMMITTED_EXEC_COLUMNS + ki]
+        bc_expected = add_extension_ret(bc_expected, mul_extension_ret(bc_gp, col_eval))
+        bc_gp = mul_extension_ret(bc_gp, bc_gamma)
+    copy_5(bc_expected, bc_batched_val)
+
+    fs = fs_duplex(fs)
+    fs, bc_left_q, _, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
+    fs, bc_right_q, _, _, _ = verify_gkr_quotient(fs, log_n_cycles)
+    bc_balance = sub_extension_ret(bc_left_q, bc_right_q)
+    bc_expected_balance = mul_extension_ret(bc_alpha, bc_batched_val)
+    copy_5(bc_balance, bc_expected_balance)
+    fs = fs_duplex(fs)
+
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
     poly_eq_public_mem = compute_eq_mle_extension(public_memory_random_point, INNER_PUBLIC_MEMORY_LOG_SIZE)
     public_memory_eval = Array(DIM)
@@ -446,9 +456,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     curr_randomness += DIM
     whir_sum = add_extension_ret(mul_extension_ret(value_bytecode_acc, curr_randomness), whir_sum)
     curr_randomness += DIM
-    if N_MEM_BIND_GROUPS_TOTAL != 0:
-        whir_sum = add_extension_ret(mul_extension_ret(mem_bind_memory_eval, curr_randomness), whir_sum)
-        curr_randomness += DIM
+    # (memory binding no longer produces a WHIR claim — combined GKR handles it)
 
     for table_index in unroll(0, N_TABLES):
         if table_index == EXECUTION_TABLE_INDEX:
@@ -551,18 +559,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     )
     curr_randomness += DIM
 
-    if N_MEM_BIND_GROUPS_TOTAL != 0:
-        eq_mem_bind = poly_eq_extension_dynamic_ret(
-            folding_randomness_global + (stacked_n_vars - log_memory) * DIM,
-            mem_bind_full_point,
-            log_memory,
-        )
-        prefix_mem_bind = multilinear_location_prefix(0, stacked_n_vars - log_memory, folding_randomness_global)
-        s = add_extension_ret(
-            s,
-            mul_extension_ret(mul_extension_ret(curr_randomness, prefix_mem_bind), eq_mem_bind),
-        )
-        curr_randomness += DIM
+    # (memory binding no longer produces a WHIR folding claim — combined GKR handles it)
 
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]
