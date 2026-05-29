@@ -105,12 +105,12 @@ pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5;
 pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9;
-// virtual columns (memory-bound, verified by combined GKR)
+// 9..77: beginning_full_rounds (32) + partial_rounds (20) + ending_full_rounds (16) = 68 intermediates
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + HALF_INITIAL_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS + (HALF_FINAL_FULL_ROUNDS - 1) * WIDTH; // = 77
+// virtual columns (memory-bound via Shout)
 pub const POSEIDON_COL_INPUT_START: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
 pub const POSEIDON_COL_OUT_LO: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH;
 pub const POSEIDON_COL_OUT_HI: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH + WIDTH / 2;
-// virtual columns (deterministic intermediates — verified by Poseidon GKR)
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -384,14 +384,13 @@ pub(super) struct Poseidon1Cols16<T> {
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    // virtual columns (memory-bound, verified by combined GKR)
-    pub inputs: [T; WIDTH],
-    pub out_lo: [T; WIDTH / 2],
-    pub out_hi: [T; WIDTH / 2],
-    // virtual columns (deterministic intermediates, verified by Poseidon GKR)
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
+    // virtual columns (memory-bound via Shout)
+    pub inputs: [T; WIDTH],
+    pub out_lo: [T; WIDTH / 2],
+    pub out_hi: [T; WIDTH / 2],
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {

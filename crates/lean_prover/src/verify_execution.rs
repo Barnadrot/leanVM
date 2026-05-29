@@ -270,52 +270,6 @@ pub fn verify_execution(
             verifier_state.duplex();
         }
 
-        // --- Phase 3: Poseidon GKR (verify deterministic intermediates) ---
-        {
-            let poseidon_table = Table::poseidon16();
-            let pos_log_n = table_n_vars[&poseidon_table];
-
-            let (_gkr_point, _gkr_claimed, _gkr_input_evals) =
-                sub_protocols::poseidon_gkr::verify_poseidon_gkr(
-                    &mut verifier_state, pos_log_n,
-                )?;
-
-            // Verify input claims at GKR endpoint via combined GKR
-            verifier_state.duplex();
-            let _c_pos: EF = verifier_state.sample();
-            verifier_state.duplex();
-            let gamma_pos: EF = verifier_state.sample();
-            verifier_state.duplex();
-            let alpha_pos: EF = verifier_state.sample();
-
-            let batched_input_val = verifier_state.next_extension_scalar()?;
-
-            // Check: batched_input_val matches GKR's final input evaluations
-            // Only the 16 input columns are verified here (outputs are already memory-bound at r_air)
-            let mut expected_input_val = EF::ZERO;
-            let mut gp_pos = EF::ONE;
-            for k in 0..16 {
-                expected_input_val += gp_pos * _gkr_input_evals[k];
-                gp_pos *= gamma_pos;
-            }
-            if expected_input_val != batched_input_val {
-                return Err(ProofError::InvalidProof);
-            }
-
-            // Left combined GKR
-            verifier_state.duplex();
-            let pos_left = verify_gkr_quotient(&mut verifier_state, log_memory)?;
-
-            // Right GKR (Poseidon table)
-            let pos_right = verify_gkr_quotient(&mut verifier_state, pos_log_n)?;
-
-            // Balance
-            if !(pos_left.0 - pos_right.0 - alpha_pos * batched_input_val).is_zero() {
-                return Err(ProofError::InvalidProof);
-            }
-            verifier_state.duplex();
-        }
-
         mem_stmt
     };
 
