@@ -187,8 +187,9 @@ pub fn prove_execution(
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
         let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
-        let mut all_pushforwards: Vec<Vec<EF>> = Vec::new();
+        let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
         let memory_size = memory.len();
+        let log_memory = log2_strict_usize(memory_size);
 
         for table in ALL_TABLES {
             let groups = memory_binding_groups(&table);
@@ -199,29 +200,17 @@ pub fn prove_execution(
             let log_n_rows = trace.log_n_rows;
             let inner_point = MultilinearPoint(from_end(gkr_point, log_n_rows).to_vec());
             let eq_r = eval_eq(&inner_point.0);
-
-            for group in &groups {
-                let addr_col = &trace.columns[group.addr_col];
-                let pf = compute_memory_pushforward(addr_col, memory_size, &eq_r);
-                all_pushforwards.push(pf);
-            }
+            eq_rs.insert(table, eq_r);
             all_groups.push((table, groups));
         }
 
-        if !all_pushforwards.is_empty() {
-            let t_mem_bind = std::time::Instant::now();
+        let n_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
+        if n_groups > 0 {
             prover_state.duplex();
-            for pf in &all_pushforwards {
-                prover_state.add_extension_scalars(pf);
-            }
+            let t_mem_bind = std::time::Instant::now();
             let gamma: EF = prover_state.sample();
 
-            let group_value_counts: Vec<usize> = all_groups
-                .iter()
-                .flat_map(|(_, gs)| gs.iter().map(|g| g.value_cols.len()))
-                .collect();
-
-            let q = compute_batched_q(&all_pushforwards, &group_value_counts, gamma, memory_size);
+            let q = compute_batched_q_from_traces(&all_groups, &traces, &eq_rs, gamma, memory_size);
             let batched_val = compute_batched_val(
                 &logup_statements.columns_values,
                 &all_groups,
@@ -230,29 +219,29 @@ pub fn prove_execution(
 
             let q_owned = MleOwned::Extension(q);
             let q_packed = q_owned.pack();
-            let mem_ext: Vec<EF> = memory.iter().map(|&x| EF::from(x)).collect();
-            let mem_owned = MleOwned::Extension(mem_ext);
+            let mem_owned = MleOwned::Base(memory.to_vec());
             let mem_packed = mem_owned.pack();
-            let log_memory = log2_strict_usize(memory_size);
 
-            let (prod_point, _prod_sum, _q_folded, _mem_folded) =
+            let (prod_point, _prod_sum, _mem_folded, _q_folded) =
                 backend::run_product_sumcheck(
-                    &q_packed.by_ref(),
                     &mem_packed.by_ref(),
+                    &q_packed.by_ref(),
                     &mut prover_state,
                     batched_val,
                     log_memory,
                     0,
                 );
 
+            let q_eval = q_owned.by_ref().evaluate(&prod_point);
             let memory_eval_at_prod = memory.evaluate(&prod_point);
+            prover_state.add_extension_scalar(q_eval);
             prover_state.add_extension_scalar(memory_eval_at_prod);
             prover_state.duplex();
 
             eprintln!(
-                "  Memory Shout binding: {:.0}ms (groups={}, pushforward_size={}, batched_val={:?})",
+                "  Memory Shout binding: {:.0}ms (groups={}, memory_size={}, batched_val={:?})",
                 t_mem_bind.elapsed().as_secs_f64() * 1000.0,
-                all_pushforwards.len(),
+                n_groups,
                 memory_size,
                 batched_val,
             );

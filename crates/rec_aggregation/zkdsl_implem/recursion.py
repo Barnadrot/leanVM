@@ -42,6 +42,10 @@ N_COMMITTED_EXEC_COLUMNS = N_COMMITTED_EXEC_COLUMNS_PLACEHOLDER
 LOG_GUEST_BYTECODE_LEN = LOG_GUEST_BYTECODE_LEN_PLACEHOLDER
 EXEC_COL_PC = COL_PC_PLACEHOLDER
 TOTAL_WHIR_STATEMENTS = TOTAL_WHIR_STATEMENTS_PLACEHOLDER
+N_MEM_BIND_GROUPS_PER_TABLE = N_MEM_BIND_GROUPS_PER_TABLE_PLACEHOLDER
+N_MEM_BIND_GROUPS_TOTAL = N_MEM_BIND_GROUPS_TOTAL_PLACEHOLDER
+N_MEM_BIND_VALUE_COLS_TOTAL = N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER
+MEM_BIND_VALUE_COLS = MEM_BIND_VALUE_COLS_PLACEHOLDER
 STARTING_PC = STARTING_PC_PLACEHOLDER
 ENDING_PC = ENDING_PC_PLACEHOLDER
 BYTECODE_POINT_N_VARS = LOG_GUEST_BYTECODE_LEN + log2_ceil(N_INSTRUCTION_COLUMNS)
@@ -312,6 +316,33 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     # TODO: check binding_left_q + binding_right_q == 0
     fs = fs_duplex(fs)
 
+    # Memory Shout binding (Wiese, "Twist and Shout via logup*", §5.1)
+    mem_bind_memory_eval: Mut = ZERO_VEC_PTR
+    mem_bind_prod_point: Mut = ZERO_VEC_PTR
+    if N_MEM_BIND_GROUPS_TOTAL != 0:
+        fs = fs_duplex(fs)
+        fs, mem_bind_gamma = fs_sample_ef(fs)
+
+        mem_bind_batched_val: Mut = ZERO_VEC_PTR
+        mem_bind_gamma_power: Mut = embed_in_ef(1)
+        for table_index in unroll(0, N_TABLES):
+            for col_idx in unroll(0, len(MEM_BIND_VALUE_COLS[table_index])):
+                col = MEM_BIND_VALUE_COLS[table_index][col_idx]
+                val_at_col = pcs_vals_logup[table_index * MAX_NUM_COLS_AIR + col]
+                mem_bind_batched_val = add_extension_ret(
+                    mem_bind_batched_val,
+                    mul_extension_ret(mem_bind_gamma_power, val_at_col),
+                )
+                mem_bind_gamma_power = mul_extension_ret(mem_bind_gamma_power, mem_bind_gamma)
+
+        fs, mem_bind_challenges, mem_bind_final_sum = sumcheck_verify(fs, log_memory, mem_bind_batched_val, 2)
+        fs, mem_bind_q_eval = fs_receive_ef_inlined(fs, 1)
+        fs, mem_bind_memory_eval = fs_receive_ef_inlined(fs, 1)
+        check_product = mul_extension_ret(mem_bind_q_eval, mem_bind_memory_eval)
+        copy_5(check_product, mem_bind_final_sum)
+        mem_bind_prod_point = mem_bind_challenges
+        fs = fs_duplex(fs)
+
     # VERIFY BUS AND AIR — back-loaded batched sumcheck
 
     fs, air_alpha = fs_sample_ef(fs)
@@ -396,6 +427,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     curr_randomness += DIM
     whir_sum = add_extension_ret(mul_extension_ret(value_bytecode_acc, curr_randomness), whir_sum)
     curr_randomness += DIM
+    if N_MEM_BIND_GROUPS_TOTAL != 0:
+        whir_sum = add_extension_ret(mul_extension_ret(mem_bind_memory_eval, curr_randomness), whir_sum)
+        curr_randomness += DIM
 
     for table_index in unroll(0, N_TABLES):
         if table_index == EXECUTION_TABLE_INDEX:
@@ -497,6 +531,19 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         mul_extension_ret(mul_extension_ret(curr_randomness, prefix_bytecode_acc), eq_bytecode_acc),
     )
     curr_randomness += DIM
+
+    if N_MEM_BIND_GROUPS_TOTAL != 0:
+        eq_mem_bind = poly_eq_extension_dynamic_ret(
+            folding_randomness_global + (stacked_n_vars - log_memory) * DIM,
+            mem_bind_prod_point,
+            log_memory,
+        )
+        prefix_mem_bind = multilinear_location_prefix(0, stacked_n_vars - log_memory, folding_randomness_global)
+        s = add_extension_ret(
+            s,
+            mul_extension_ret(mul_extension_ret(curr_randomness, prefix_mem_bind), eq_mem_bind),
+        )
+        curr_randomness += DIM
 
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]

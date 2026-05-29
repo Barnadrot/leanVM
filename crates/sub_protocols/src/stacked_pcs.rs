@@ -223,6 +223,7 @@ pub fn min_stacked_n_vars(log_bytecode: usize) -> usize {
 }
 
 pub fn total_whir_statements() -> usize {
+    let has_memory_binding = crate::memory_binding::total_memory_binding_groups() > 0;
     6 // memory + memory_acc + public_memory + bytecode_acc + pc_start + pc_end
      + ALL_TABLES
         .iter()
@@ -240,6 +241,6 @@ pub fn total_whir_statements() -> usize {
             n_committed + table.n_shift_columns() + committed_seen
         })
         .sum::<usize>()
-        // bytecode lookup: PC (col 0) is committed, instruction cols are bytecode-bound (not WHIR claims)
-        + 1 // PC
+        + 1 // PC (bytecode-bound)
+        + if has_memory_binding { 1 } else { 0 } // memory at product sumcheck endpoint
 }

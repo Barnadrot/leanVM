@@ -116,39 +116,21 @@ pub fn verify_execution(
     // --- Memory Shout binding verification ---
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
-        let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
-        let mut pushforward_sizes: Vec<usize> = Vec::new();
-        let memory_size = 1 << log_memory;
+        let n_groups = total_memory_binding_groups();
 
-        for table in ALL_TABLES {
-            let groups = memory_binding_groups(&table);
-            if groups.is_empty() {
-                continue;
-            }
-            for _group in &groups {
-                pushforward_sizes.push(memory_size);
-            }
-            all_groups.push((table, groups));
-        }
-
-        if !pushforward_sizes.is_empty() {
+        if n_groups > 0 {
             verifier_state.duplex();
-            let mut all_pushforwards: Vec<Vec<EF>> = Vec::new();
-            for &pf_size in &pushforward_sizes {
-                let pf = verifier_state.next_extension_scalars_vec(pf_size)?;
-                all_pushforwards.push(pf);
-            }
             let gamma: EF = verifier_state.sample();
 
-            let group_value_counts: Vec<usize> = all_groups
-                .iter()
-                .flat_map(|(_, gs)| gs.iter().map(|g| g.value_cols.len()))
-                .collect();
-
-            let q = compute_batched_q(&all_pushforwards, &group_value_counts, gamma, memory_size);
             let batched_val = compute_batched_val(
                 &logup_statements.columns_values,
-                &all_groups,
+                &ALL_TABLES
+                    .iter()
+                    .filter_map(|t| {
+                        let g = memory_binding_groups(t);
+                        if g.is_empty() { None } else { Some((*t, g)) }
+                    })
+                    .collect::<Vec<_>>(),
                 gamma,
             );
 
@@ -160,10 +142,9 @@ pub fn verify_execution(
                 None,
             )?;
 
+            let q_eval = verifier_state.next_extension_scalar()?;
             let memory_eval_at_prod = verifier_state.next_extension_scalar()?;
-            let q_eval = q.evaluate(&prod_eval.point);
             if prod_eval.value != q_eval * memory_eval_at_prod {
-                eprintln!("  Memory Shout binding: product sumcheck final check FAILED");
                 return Err(ProofError::InvalidProof);
             }
             verifier_state.duplex();
@@ -288,7 +269,6 @@ pub fn verify_execution(
             )],
         ),
     ];
-    let has_memory_binding = memory_binding_statement.is_some();
     if let Some(mem_bind_stmt) = memory_binding_statement {
         previous_statements.push(mem_bind_stmt);
     }
@@ -305,7 +285,7 @@ pub fn verify_execution(
 
     // sanity check (not necessary for soundness)
     let num_whir_statements = global_statements_base.iter().map(|s| s.values.len()).sum::<usize>();
-    let expected = total_whir_statements() + if has_memory_binding { 1 } else { 0 };
+    let expected = total_whir_statements();
     assert_eq!(num_whir_statements, expected);
 
     WhirConfig::new(&whir_config, parsed_commitment.num_variables).verify(

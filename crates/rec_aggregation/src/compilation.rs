@@ -440,6 +440,40 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
         "TOTAL_WHIR_STATEMENTS_PLACEHOLDER".to_string(),
         total_whir_statements().to_string(),
     );
+    // Memory binding constants
+    {
+        use sub_protocols::memory_binding::{memory_binding_groups, total_memory_binding_groups, total_memory_bound_value_cols};
+        let n_mem_bind_groups_per_table: Vec<String> = ALL_TABLES
+            .iter()
+            .map(|t| memory_binding_groups(t).len().to_string())
+            .collect();
+        replacements.insert(
+            "N_MEM_BIND_GROUPS_PER_TABLE_PLACEHOLDER".to_string(),
+            format!("[{}]", n_mem_bind_groups_per_table.join(", ")),
+        );
+        replacements.insert(
+            "N_MEM_BIND_GROUPS_TOTAL_PLACEHOLDER".to_string(),
+            total_memory_binding_groups().to_string(),
+        );
+        replacements.insert(
+            "N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER".to_string(),
+            total_memory_bound_value_cols().to_string(),
+        );
+        let mut mem_bind_value_cols_per_table: Vec<String> = Vec::new();
+        for table in ALL_TABLES.iter() {
+            let groups = memory_binding_groups(table);
+            let cols: Vec<String> = groups
+                .iter()
+                .flat_map(|g| g.value_cols.iter())
+                .map(|c| c.to_string())
+                .collect();
+            mem_bind_value_cols_per_table.push(format!("[{}]", cols.join(", ")));
+        }
+        replacements.insert(
+            "MEM_BIND_VALUE_COLS_PLACEHOLDER".to_string(),
+            format!("[{}]", mem_bind_value_cols_per_table.join(", ")),
+        );
+    }
     replacements.insert("STARTING_PC_PLACEHOLDER".to_string(), STARTING_PC.to_string());
     replacements.insert("ENDING_PC_PLACEHOLDER".to_string(), ending_pc.to_string());
 
