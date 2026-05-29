@@ -143,6 +143,7 @@ pub fn verify_execution(
     } = sumcheck_verify(&mut verifier_state, n_max, max_full_degree, initial_sum, None)?;
 
     let mut my_air_final_value = EF::ZERO;
+    let mut table_col_evals: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
     for vd in &verify_data {
         let n_cols_total = vd.table.n_columns() + vd.table.n_shift_columns();
         let col_evals = verifier_state.next_extension_scalars_vec(n_cols_total)?;
@@ -167,19 +168,21 @@ pub fn verify_execution(
         let claim = delegate_to_inner!(&vd.table => split);
 
         committed_statements.get_mut(&vd.table).unwrap().push(claim);
+        table_col_evals.insert(vd.table, col_evals);
     }
 
     if my_air_final_value != claimed_air_final_value {
         return Err(ProofError::InvalidProof);
     }
 
-    // --- Post-AIR-sumcheck binding: pushforward-based value derivation ---
+    // --- Post-AIR-sumcheck binding (V-3 bytecode + V-4 memory) ---
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
-        let n_groups = total_memory_binding_groups();
+        let n_mem_groups = total_memory_binding_groups();
         let memory_size = 1usize << log_memory;
 
-        if n_groups > 0 {
+        // --- V-4: Memory-bound value columns ---
+        let mem_stmt = if n_mem_groups > 0 {
             verifier_state.duplex();
             let c_bind: EF = verifier_state.sample();
 
@@ -200,16 +203,30 @@ pub fn verify_execution(
             }
 
             verifier_state.duplex();
-            let _gamma: EF = verifier_state.sample();
+            let gamma: EF = verifier_state.sample();
 
             let batched_val = verifier_state.next_extension_scalar()?;
 
+            // Issue 1 fix: check batched_val matches prover-supplied column evaluations
+            let mut expected_batched_val = EF::ZERO;
+            let mut gamma_power = EF::ONE;
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                if groups.is_empty() { continue; }
+                let col_evals = &table_col_evals[&table];
+                for group in &groups {
+                    for &val_col in &group.value_cols {
+                        expected_batched_val += gamma_power * col_evals[val_col];
+                        gamma_power *= gamma;
+                    }
+                }
+            }
+            if expected_batched_val != batched_val {
+                return Err(ProofError::InvalidProof);
+            }
+
             let prod_eval = sumcheck_verify(
-                &mut verifier_state,
-                log_memory,
-                2,
-                batched_val,
-                None,
+                &mut verifier_state, log_memory, 2, batched_val, None,
             )?;
 
             let p_eval = verifier_state.next_extension_scalar()?;
@@ -226,7 +243,38 @@ pub fn verify_execution(
             ))
         } else {
             None
+        };
+
+        // --- V-3: Bytecode-bound instruction columns ---
+        let exec_table = Table::execution();
+        if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+            let bytecode_table_size = 1usize << bytecode.log_size();
+            let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+
+            let pushforward_bc = verifier_state.next_extension_scalars_vec(bytecode_table_size)?;
+
+            verifier_state.duplex();
+            let c_bc: EF = verifier_state.sample();
+            let left = verify_gkr_quotient(&mut verifier_state, table_n_vars[&exec_table])?;
+            let right = verify_gkr_quotient(&mut verifier_state, bytecode.log_size())?;
+            if !(left.0 + right.0).is_zero() {
+                return Err(ProofError::InvalidProof);
+            }
+            verifier_state.duplex();
+
+            let derived = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
+                &pushforward_bc, &bytecode.instructions_multilinear,
+                bc_range.len(), bytecode_stride,
+            );
+            let col_evals = &table_col_evals[&exec_table];
+            for (k, &derived_k) in derived.iter().enumerate() {
+                if derived_k != col_evals[bc_range.start + k] {
+                    return Err(ProofError::InvalidProof);
+                }
+            }
         }
+
+        mem_stmt
     };
 
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));

@@ -212,6 +212,7 @@ pub fn prove_execution(
     let sumcheck_air_point =
         info_span!("batched AIR sumcheck").in_scope(|| prove_batched_air_sumcheck(&mut prover_state, &mut sessions));
 
+    let mut table_col_evals: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
     for (idx, table) in ALL_TABLES.iter().enumerate() {
         let col_evals = sessions[idx].final_column_evals();
         prover_state.add_extension_scalars(&col_evals);
@@ -223,16 +224,19 @@ pub fn prove_execution(
         }
         let claim = delegate_to_inner!(table => split);
         committed_statements.get_mut(table).unwrap().push(claim);
+        table_col_evals.insert(*table, col_evals);
     }
 
-    // --- Post-AIR-sumcheck binding: pushforward-based value derivation ---
-    // Fixes V-3 (bytecode) and V-4 (memory) by having the verifier derive
-    // virtual column evaluations from pushforwards instead of trusting prover.
+    // --- Post-AIR-sumcheck binding (V-3 bytecode + V-4 memory) ---
+    // The verifier derives virtual column evaluations from pushforwards
+    // and checks them against the prover-supplied col_evals.
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
         let memory_size = memory.len();
         let log_memory = log2_strict_usize(memory_size);
+        let t_bind = std::time::Instant::now();
 
+        // --- V-4: Memory-bound value columns ---
         let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
         let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
 
@@ -246,13 +250,11 @@ pub fn prove_execution(
             all_groups.push((table, groups));
         }
 
-        let n_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
-        if n_groups > 0 {
-            let t_bind = std::time::Instant::now();
+        let n_mem_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
+        let mem_stmt = if n_mem_groups > 0 {
             prover_state.duplex();
             let c_bind: EF = prover_state.sample();
 
-            // Compute and send pushforwards; prove well-formedness via GKR
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
                 let eq_r = &eq_rs[table];
@@ -264,26 +266,24 @@ pub fn prove_execution(
 
                     prover_state.duplex();
                     let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
-                        &mut prover_state,
-                        eq_r,
-                        &trace.columns[group.addr_col],
-                        &pushforward,
-                        c_bind,
+                        &mut prover_state, eq_r,
+                        &trace.columns[group.addr_col], &pushforward, c_bind,
                     );
                     debug_assert!((left.0 + right.0).is_zero());
                     prover_state.duplex();
                 }
             }
 
-            // Batched product sumcheck: <P_batched, memory> = batched_val
             prover_state.duplex();
             let gamma: EF = prover_state.sample();
 
             let mut p_batched = EF::zero_vec(memory_size);
+            let mut expected_batched_val = EF::ZERO;
             let mut gamma_power = EF::ONE;
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
                 let eq_r = &eq_rs[table];
+                let col_evals = &table_col_evals[table];
                 for group in groups {
                     for k in 0..group.value_cols.len() {
                         let addr_col = &trace.columns[group.addr_col];
@@ -293,14 +293,16 @@ pub fn prove_execution(
                                 p_batched[j] += gamma_power * eq_r[i];
                             }
                         }
+                        expected_batched_val += gamma_power * col_evals[group.value_cols[k]];
                         gamma_power *= gamma;
                     }
                 }
             }
 
             let batched_val: EF = p_batched.iter().zip(memory.iter())
-                .map(|(&p, &m)| p * m)
-                .sum();
+                .map(|(&p, &m)| p * m).sum();
+            debug_assert_eq!(batched_val, expected_batched_val,
+                "batched_val from pushforward must match col_evals for virtual value columns");
             prover_state.add_extension_scalar(batched_val);
 
             let p_owned = MleOwned::Extension(p_batched);
@@ -308,26 +310,16 @@ pub fn prove_execution(
             let m_owned = MleOwned::Base(memory.to_vec());
             let m_packed = m_owned.pack();
 
-            let (prod_point, _prod_sum, _m_folded, _q_folded) =
-                backend::run_product_sumcheck(
-                    &m_packed.by_ref(),
-                    &p_packed.by_ref(),
-                    &mut prover_state,
-                    batched_val,
-                    log_memory,
-                    0,
-                );
+            let (prod_point, _, _, _) = backend::run_product_sumcheck(
+                &m_packed.by_ref(), &p_packed.by_ref(),
+                &mut prover_state, batched_val, log_memory, 0,
+            );
 
             let p_eval = p_owned.by_ref().evaluate(&prod_point);
             let m_eval = m_owned.by_ref().evaluate(&prod_point);
             prover_state.add_extension_scalar(p_eval);
             prover_state.add_extension_scalar(m_eval);
             prover_state.duplex();
-
-            eprintln!(
-                "  Post-AIR binding: {:.0}ms (groups={}, log_memory={})",
-                t_bind.elapsed().as_secs_f64() * 1000.0, n_groups, log_memory,
-            );
 
             Some(SparseStatement::new(
                 stacked_pcs_witness.stacked_n_vars,
@@ -336,7 +328,48 @@ pub fn prove_execution(
             ))
         } else {
             None
+        };
+
+        // --- V-3: Bytecode-bound instruction columns ---
+        let exec_table = Table::execution();
+        if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+            let exec_log_n = traces[&exec_table].log_n_rows;
+            let r_air_exec = natural_ordering_point_for_session(&sumcheck_air_point.0, exec_log_n);
+            let eq_r_exec = eval_eq(&r_air_exec);
+            let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
+            let bytecode_table_size = 1usize << bytecode.log_size();
+            let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+
+            let pushforward_bc = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
+                pc_col, bytecode_table_size, &eq_r_exec,
+            );
+            prover_state.add_extension_scalars(&pushforward_bc);
+
+            prover_state.duplex();
+            let c_bc: EF = prover_state.sample();
+            let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
+                &mut prover_state, &eq_r_exec, pc_col, &pushforward_bc, c_bc,
+            );
+            debug_assert!((left.0 + right.0).is_zero());
+            prover_state.duplex();
+
+            let derived = sub_protocols::bytecode_binding::derive_instruction_evals::<EF>(
+                &pushforward_bc, &bytecode.instructions_multilinear,
+                bc_range.len(), bytecode_stride,
+            );
+            let col_evals = &table_col_evals[&exec_table];
+            for (k, &derived_k) in derived.iter().enumerate() {
+                debug_assert_eq!(derived_k, col_evals[bc_range.start + k],
+                    "bytecode-derived instr_{k} must match col_evals");
+            }
         }
+
+        eprintln!(
+            "  Post-AIR binding: {:.0}ms (mem_groups={}, log_memory={})",
+            t_bind.elapsed().as_secs_f64() * 1000.0, n_mem_groups, log_memory,
+        );
+
+        mem_stmt
     };
 
     let public_memory_random_point = MultilinearPoint(prover_state.sample_vec(log2_strict_usize(PUBLIC_INPUT_LEN)));
