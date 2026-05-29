@@ -74,14 +74,6 @@ pub fn verify_execution(
 
     let logup_c = verifier_state.sample();
 
-    // LOGUP* eq point for bytecode binding (must match prover's sampling)
-    let exec_table = Table::execution();
-    if exec_table.bytecode_bound_columns().is_some() {
-        let exec_max_log_n = max_log_n_rows_per_table(&exec_table);
-        verifier_state.duplex();
-        let _logup_star_r: Vec<EF> = verifier_state.sample_vec(exec_max_log_n);
-    }
-
     verifier_state.duplex();
     let logup_alphas = verifier_state.sample_vec(LOG_MAX_BUS_WIDTH);
     let logup_alphas_eq_poly = eval_eq(&logup_alphas);
@@ -96,77 +88,6 @@ pub fn verify_execution(
         &table_n_vars,
     )?;
     let gkr_point = &logup_statements.gkr_point;
-
-    // LOGUP* binding GKR verification (must consume transcript data matching prover)
-    if exec_table.bytecode_bound_columns().is_some() {
-        let exec_n_vars = table_n_vars[&exec_table];
-        let bytecode_n_vars = bytecode.log_size();
-        eprintln!("  verify binding GKR: exec_n_vars={exec_n_vars} bytecode_n_vars={bytecode_n_vars}");
-        verifier_state.duplex();
-        // Left GKR (execution table, v=exec_n_vars)
-        let left = verify_gkr_quotient(&mut verifier_state, exec_n_vars)?;
-        let right = verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
-        if !(left.0 + right.0).is_zero() {
-            return Err(ProofError::InvalidProof);
-        }
-        verifier_state.duplex();
-    }
-
-    // --- Memory Shout binding d=2 verification ---
-    let memory_binding_statement = {
-        use sub_protocols::memory_binding::*;
-        let n_groups = total_memory_binding_groups();
-        let half_bits = log_memory / 2;
-        let s = 1usize << half_bits;
-
-        if n_groups > 0 {
-            verifier_state.duplex();
-
-            // Read P_hi per group (committed via FS absorption)
-            let mut _p_hi_all = Vec::new();
-            for table in ALL_TABLES {
-                let groups = memory_binding_groups(&table);
-                for _group in &groups {
-                    let p_hi = verifier_state.next_extension_scalars_vec(s)?;
-                    _p_hi_all.push(p_hi);
-                }
-            }
-
-            verifier_state.duplex();
-            let s_hi: Vec<EF> = verifier_state.sample_vec(half_bits);
-            verifier_state.duplex();
-            let gamma: EF = verifier_state.sample();
-
-            let weighted_batched_val = verifier_state.next_extension_scalar()?;
-
-            let prod_eval = sumcheck_verify(
-                &mut verifier_state,
-                half_bits,
-                2,
-                weighted_batched_val,
-                None,
-            )?;
-
-            let q_lo_eval = verifier_state.next_extension_scalar()?;
-            let m_slice_eval = verifier_state.next_extension_scalar()?;
-            if prod_eval.value != q_lo_eval * m_slice_eval {
-                return Err(ProofError::InvalidProof);
-            }
-            verifier_state.duplex();
-
-            let mut full_memory_point = s_hi;
-            full_memory_point.extend_from_slice(&prod_eval.point.0);
-            let full_memory_point = MultilinearPoint(full_memory_point);
-
-            Some(SparseStatement::new(
-                parsed_commitment.num_variables,
-                full_memory_point,
-                vec![SparseValue::new(0, m_slice_eval)],
-            ))
-        } else {
-            None
-        }
-    };
 
     let mut committed_statements: CommittedStatements = Default::default();
     for table in ALL_TABLES {
@@ -251,6 +172,62 @@ pub fn verify_execution(
     if my_air_final_value != claimed_air_final_value {
         return Err(ProofError::InvalidProof);
     }
+
+    // --- Post-AIR-sumcheck binding: pushforward-based value derivation ---
+    let memory_binding_statement = {
+        use sub_protocols::memory_binding::*;
+        let n_groups = total_memory_binding_groups();
+        let memory_size = 1usize << log_memory;
+
+        if n_groups > 0 {
+            verifier_state.duplex();
+            let c_bind: EF = verifier_state.sample();
+
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                let log_n = table_n_vars[&table];
+                for _group in &groups {
+                    let _pushforward = verifier_state.next_extension_scalars_vec(memory_size)?;
+
+                    verifier_state.duplex();
+                    let left = verify_gkr_quotient(&mut verifier_state, log_n)?;
+                    let right = verify_gkr_quotient(&mut verifier_state, log_memory)?;
+                    if !(left.0 + right.0).is_zero() {
+                        return Err(ProofError::InvalidProof);
+                    }
+                    verifier_state.duplex();
+                }
+            }
+
+            verifier_state.duplex();
+            let _gamma: EF = verifier_state.sample();
+
+            let batched_val = verifier_state.next_extension_scalar()?;
+
+            let prod_eval = sumcheck_verify(
+                &mut verifier_state,
+                log_memory,
+                2,
+                batched_val,
+                None,
+            )?;
+
+            let p_eval = verifier_state.next_extension_scalar()?;
+            let m_eval = verifier_state.next_extension_scalar()?;
+            if prod_eval.value != p_eval * m_eval {
+                return Err(ProofError::InvalidProof);
+            }
+            verifier_state.duplex();
+
+            Some(SparseStatement::new(
+                parsed_commitment.num_variables,
+                prod_eval.point,
+                vec![SparseValue::new(0, m_eval)],
+            ))
+        } else {
+            None
+        }
+    };
 
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));
     let public_memory_eval = public_input.evaluate(&public_memory_random_point);

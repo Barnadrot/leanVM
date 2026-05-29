@@ -115,39 +115,13 @@ pub fn prove_execution(
         &traces,
     );
 
-    // logup (GKR) with LOGUP* bytecode binding (eprint 2025/946)
+    // logup (GKR)
     let logup_c = prover_state.sample();
-
-    // LOGUP* eq point for bytecode binding: sample BEFORE GKR
-    let exec_table = Table::execution();
-    let logup_star_pushforward = if exec_table.bytecode_bound_columns().is_some() {
-        let exec_log_n = traces[&exec_table].log_n_rows;
-        let exec_max_log_n = max_log_n_rows_per_table(&exec_table);
-        prover_state.duplex();
-        let logup_star_r_full: Vec<EF> = prover_state.sample_vec(exec_max_log_n);
-        let logup_star_r = logup_star_r_full[..exec_log_n].to_vec();
-        let eq_r = eval_eq(&logup_star_r);
-        let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
-        let bytecode_table_size = 1usize << bytecode.log_size();
-        let pushforward = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
-            pc_col, bytecode_table_size, &eq_r,
-        );
-        eprintln!("  LOGUP* pushforward: {} ext elements", pushforward.len());
-        Some((pushforward, logup_star_r))
-    } else {
-        None
-    };
 
     prover_state.duplex();
     let logup_alphas = prover_state.sample_vec(LOG_MAX_BUS_WIDTH);
     let logup_alphas_eq_poly = eval_eq(&logup_alphas);
 
-    let logup_star_data = logup_star_pushforward.as_ref().map(|(pushforward, logup_star_r)| {
-        LogupStarData {
-            pushforward: pushforward.clone(),
-            eq_r: eval_eq(&logup_star_r),
-        }
-    });
     let logup_statements = prove_generic_logup(
         &mut prover_state,
         logup_c,
@@ -157,138 +131,9 @@ pub fn prove_execution(
         &bytecode.instructions_multilinear,
         &bytecode_acc,
         &traces,
-        logup_star_data.as_ref(),
+        None,
     );
     let gkr_point = &logup_statements.gkr_point;
-
-    // --- LOGUP* bytecode binding GKR proof ---
-    if let (Some((pushforward, logup_star_r)), Some(_bc_range)) =
-        (&logup_star_pushforward, exec_table.bytecode_bound_columns())
-    {
-        let exec_trace = &traces[&exec_table];
-        let eq_r = logup_star_data.as_ref().unwrap().eq_r.clone();
-        let pc_col = &exec_trace.columns[EXEC_COL_PC];
-
-        let t_binding = std::time::Instant::now();
-        prover_state.duplex();
-        let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
-            &mut prover_state,
-            &eq_r,
-            pc_col,
-            pushforward,
-            logup_c,
-        );
-        eprintln!("  LOGUP* binding GKR: {:.0}ms (left_q={:?}, right_q={:?})",
-            t_binding.elapsed().as_secs_f64() * 1000.0, left.0, right.0);
-        prover_state.duplex();
-    }
-
-    // --- Memory Shout binding d=2 (Wiese, "Twist and Shout via logup*", §5.1) ---
-    let memory_binding_statement = {
-        use sub_protocols::memory_binding::*;
-        let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
-        let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
-        let memory_size = memory.len();
-        let log_memory = log2_strict_usize(memory_size);
-        let half_bits = log_memory / 2;
-
-        for table in ALL_TABLES {
-            let groups = memory_binding_groups(&table);
-            if groups.is_empty() {
-                continue;
-            }
-            let trace = &traces[&table];
-            let log_n_rows = trace.log_n_rows;
-            let inner_point = MultilinearPoint(from_end(gkr_point, log_n_rows).to_vec());
-            let eq_r = eval_eq(&inner_point.0);
-            eq_rs.insert(table, eq_r);
-            all_groups.push((table, groups));
-        }
-
-        let n_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
-        if n_groups > 0 {
-            let t_mem_bind = std::time::Instant::now();
-            prover_state.duplex();
-
-            // Step 1: Compute and absorb marginal pushforwards P_hi (size 2^half_bits each)
-            for (table, groups) in &all_groups {
-                let trace = &traces[table];
-                let eq_r = &eq_rs[table];
-                for group in groups {
-                    let p_hi = compute_pushforward_hi(
-                        &trace.columns[group.addr_col], half_bits, eq_r,
-                    );
-                    prover_state.add_extension_scalars(&p_hi);
-                }
-            }
-
-            // Step 2: Sample s_hi and γ
-            prover_state.duplex();
-            let s_hi: Vec<EF> = prover_state.sample_vec(half_bits);
-            prover_state.duplex();
-            let gamma: EF = prover_state.sample();
-            let eq_s_hi = eval_eq(&s_hi);
-
-            // Step 3: Fold memory to slice at s_hi (size 2^half_bits)
-            let t3 = std::time::Instant::now();
-            let m_slice = fold_memory_slice(&memory, &eq_s_hi, half_bits);
-            let t3_ms = t3.elapsed().as_secs_f64() * 1000.0;
-
-            // Step 4: Compute Q_lo (size 2^half_bits) with eq_{s_hi} weights
-            let t4 = std::time::Instant::now();
-            let q_lo = compute_q_lo_d2(
-                &all_groups, &traces, &eq_rs, &eq_s_hi, gamma, half_bits,
-            );
-            let t4_ms = t4.elapsed().as_secs_f64() * 1000.0;
-
-            // Step 5: Compute weighted_batched_val and send it
-            let weighted_batched_val = compute_weighted_batched_val(&q_lo, &m_slice);
-            prover_state.add_extension_scalar(weighted_batched_val);
-
-            // Step 6: Product sumcheck at v=half_bits
-            let q_lo_owned = MleOwned::Extension(q_lo);
-            let q_lo_packed = q_lo_owned.pack();
-            let m_slice_owned = MleOwned::Extension(m_slice);
-            let m_slice_packed = m_slice_owned.pack();
-
-            let (prod_point, _prod_sum, _m_folded, _q_folded) =
-                backend::run_product_sumcheck(
-                    &m_slice_packed.by_ref(),
-                    &q_lo_packed.by_ref(),
-                    &mut prover_state,
-                    weighted_batched_val,
-                    half_bits,
-                    0,
-                );
-
-            // Step 7: Send endpoint evaluations
-            let q_lo_eval = q_lo_owned.by_ref().evaluate(&prod_point);
-            let m_slice_eval = m_slice_owned.by_ref().evaluate(&prod_point);
-            prover_state.add_extension_scalar(q_lo_eval);
-            prover_state.add_extension_scalar(m_slice_eval);
-            prover_state.duplex();
-
-            // m_slice(s_lo) = memory(s_hi || s_lo) → WHIR claim at full memory point
-            let mut full_memory_point = s_hi.clone();
-            full_memory_point.extend_from_slice(&prod_point.0);
-            let full_memory_point = MultilinearPoint(full_memory_point);
-
-            eprintln!(
-                "  Memory Shout d=2: {:.0}ms (fold={:.0}ms q_lo={:.0}ms, groups={}, half_bits={})",
-                t_mem_bind.elapsed().as_secs_f64() * 1000.0,
-                t3_ms, t4_ms,
-                n_groups, half_bits,
-            );
-
-            Some(SparseStatement::new(
-                stacked_pcs_witness.stacked_n_vars,
-                full_memory_point,
-                vec![SparseValue::new(0, m_slice_eval)],
-            ))
-        } else {
-            None
-        }
-    };
 
     let mut committed_statements: CommittedStatements = Default::default();
     for table in ALL_TABLES {
@@ -379,6 +224,120 @@ pub fn prove_execution(
         let claim = delegate_to_inner!(table => split);
         committed_statements.get_mut(table).unwrap().push(claim);
     }
+
+    // --- Post-AIR-sumcheck binding: pushforward-based value derivation ---
+    // Fixes V-3 (bytecode) and V-4 (memory) by having the verifier derive
+    // virtual column evaluations from pushforwards instead of trusting prover.
+    let memory_binding_statement = {
+        use sub_protocols::memory_binding::*;
+        let memory_size = memory.len();
+        let log_memory = log2_strict_usize(memory_size);
+
+        let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
+        let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
+
+        for table in ALL_TABLES {
+            let groups = memory_binding_groups(&table);
+            if groups.is_empty() { continue; }
+            let log_n_rows = traces[&table].log_n_rows;
+            let r_air_for_table =
+                natural_ordering_point_for_session(&sumcheck_air_point.0, log_n_rows);
+            eq_rs.insert(table, eval_eq(&r_air_for_table));
+            all_groups.push((table, groups));
+        }
+
+        let n_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
+        if n_groups > 0 {
+            let t_bind = std::time::Instant::now();
+            prover_state.duplex();
+            let c_bind: EF = prover_state.sample();
+
+            // Compute and send pushforwards; prove well-formedness via GKR
+            for (table, groups) in &all_groups {
+                let trace = &traces[table];
+                let eq_r = &eq_rs[table];
+                for group in groups {
+                    let pushforward = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
+                        &trace.columns[group.addr_col], memory_size, eq_r,
+                    );
+                    prover_state.add_extension_scalars(&pushforward);
+
+                    prover_state.duplex();
+                    let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
+                        &mut prover_state,
+                        eq_r,
+                        &trace.columns[group.addr_col],
+                        &pushforward,
+                        c_bind,
+                    );
+                    debug_assert!((left.0 + right.0).is_zero());
+                    prover_state.duplex();
+                }
+            }
+
+            // Batched product sumcheck: <P_batched, memory> = batched_val
+            prover_state.duplex();
+            let gamma: EF = prover_state.sample();
+
+            let mut p_batched = EF::zero_vec(memory_size);
+            let mut gamma_power = EF::ONE;
+            for (table, groups) in &all_groups {
+                let trace = &traces[table];
+                let eq_r = &eq_rs[table];
+                for group in groups {
+                    for k in 0..group.value_cols.len() {
+                        let addr_col = &trace.columns[group.addr_col];
+                        for (i, &addr) in addr_col.iter().enumerate() {
+                            let j = addr.to_usize() + k;
+                            if j < memory_size {
+                                p_batched[j] += gamma_power * eq_r[i];
+                            }
+                        }
+                        gamma_power *= gamma;
+                    }
+                }
+            }
+
+            let batched_val: EF = p_batched.iter().zip(memory.iter())
+                .map(|(&p, &m)| p * m)
+                .sum();
+            prover_state.add_extension_scalar(batched_val);
+
+            let p_owned = MleOwned::Extension(p_batched);
+            let p_packed = p_owned.pack();
+            let m_owned = MleOwned::Base(memory.to_vec());
+            let m_packed = m_owned.pack();
+
+            let (prod_point, _prod_sum, _m_folded, _q_folded) =
+                backend::run_product_sumcheck(
+                    &m_packed.by_ref(),
+                    &p_packed.by_ref(),
+                    &mut prover_state,
+                    batched_val,
+                    log_memory,
+                    0,
+                );
+
+            let p_eval = p_owned.by_ref().evaluate(&prod_point);
+            let m_eval = m_owned.by_ref().evaluate(&prod_point);
+            prover_state.add_extension_scalar(p_eval);
+            prover_state.add_extension_scalar(m_eval);
+            prover_state.duplex();
+
+            eprintln!(
+                "  Post-AIR binding: {:.0}ms (groups={}, log_memory={})",
+                t_bind.elapsed().as_secs_f64() * 1000.0, n_groups, log_memory,
+            );
+
+            Some(SparseStatement::new(
+                stacked_pcs_witness.stacked_n_vars,
+                prod_point,
+                vec![SparseValue::new(0, m_eval)],
+            ))
+        } else {
+            None
+        }
+    };
 
     let public_memory_random_point = MultilinearPoint(prover_state.sample_vec(log2_strict_usize(PUBLIC_INPUT_LEN)));
     let public_memory_eval = (&memory[..PUBLIC_INPUT_LEN]).evaluate(&public_memory_random_point);
