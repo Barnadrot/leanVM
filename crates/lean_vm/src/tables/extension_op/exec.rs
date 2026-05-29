@@ -168,12 +168,6 @@ pub(super) fn exec_multi_row(
         trace.columns[COL_IDX_B].push(idx_bs[i]);
         trace.columns[COL_IDX_RES].push(ptr_res);
 
-        // shout_lo/shout_hi: filled in post-processing (depends on memory size)
-        for g in 0..N_EXTENSION_MEMORY_GROUPS {
-            trace.columns[COL_SHOUT_LO_EXT_START + g].push(F::ZERO);
-            trace.columns[COL_SHOUT_HI_EXT_START + g].push(F::ZERO);
-        }
-
         // COL_V_A+0..5: filled later by fill_trace_extension_op (push zeros as placeholders)
         for k in 0..DIMENSION {
             trace.columns[COL_V_A + k].push(F::ZERO);
@@ -208,16 +202,3 @@ pub fn fill_trace_extension_op(trace: &mut TableTrace, memory: &[F]) {
     }
 }
 
-pub fn fill_shout_decomposition_extension_op(columns: &mut [Vec<F>], log_memory: usize) {
-    let half_bits = log_memory / 2;
-    let mask = (1usize << half_bits) - 1;
-    let addr_cols = [COL_IDX_A, COL_IDX_B, COL_IDX_RES];
-    for (g, &addr_col) in addr_cols.iter().enumerate() {
-        let n = columns[addr_col].len();
-        for i in 0..n {
-            let addr = columns[addr_col][i].to_usize();
-            columns[COL_SHOUT_LO_EXT_START + g][i] = F::from_usize(addr & mask);
-            columns[COL_SHOUT_HI_EXT_START + g][i] = F::from_usize(addr >> half_bits);
-        }
-    }
-}

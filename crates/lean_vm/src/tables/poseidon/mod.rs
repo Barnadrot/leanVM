@@ -84,25 +84,6 @@ fn mul_kb<A: PrimeCharacteristicRing + 'static>(a: A, value: F) -> A {
 mod trace_gen;
 pub use trace_gen::fill_trace_poseidon_16;
 
-pub fn fill_shout_decomposition_poseidon_16(columns: &mut [Vec<F>], log_memory: usize) {
-    let half_bits = log_memory / 2;
-    let mask = (1usize << half_bits) - 1;
-    let addr_cols = [
-        POSEIDON_COL_ADDR_LEFT_LO,
-        POSEIDON_COL_ADDR_LEFT_HI,
-        POSEIDON_COL_NU_B,
-        POSEIDON_COL_NU_C,
-    ];
-    for (g, &addr_col) in addr_cols.iter().enumerate() {
-        let n = columns[addr_col].len();
-        for i in 0..n {
-            let addr = columns[addr_col][i].to_usize();
-            columns[POSEIDON_COL_SHOUT_LO_START + g][i] = F::from_usize(addr & mask);
-            columns[POSEIDON_COL_SHOUT_HI_START + g][i] = F::from_usize(addr >> half_bits);
-        }
-    }
-}
-
 pub(super) const WIDTH: usize = 16;
 const HALF_INITIAL_FULL_ROUNDS: usize = POSEIDON1_HALF_FULL_ROUNDS / 2;
 const PARTIAL_ROUNDS: usize = POSEIDON1_PARTIAL_ROUNDS;
@@ -124,10 +105,8 @@ pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5;
 pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
-pub const POSEIDON_COL_SHOUT_LO_START: ColIndex = 9;
-pub const POSEIDON_COL_SHOUT_HI_START: ColIndex = 9 + N_POSEIDON_MEMORY_GROUPS;
-const POSEIDON_INTERMEDIATES_START: ColIndex = 9 + 2 * N_POSEIDON_MEMORY_GROUPS; // = 17
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = POSEIDON_INTERMEDIATES_START + HALF_INITIAL_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS + (HALF_FINAL_FULL_ROUNDS - 1) * WIDTH; // = 85
+// 9..77: beginning_full_rounds (32) + partial_rounds (20) + ending_full_rounds (16) = 68 intermediates
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + HALF_INITIAL_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS + (HALF_FINAL_FULL_ROUNDS - 1) * WIDTH; // = 77
 // virtual columns (memory-bound via Shout)
 pub const POSEIDON_COL_INPUT_START: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
 pub const POSEIDON_COL_OUT_LO: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH;
@@ -294,11 +273,6 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         trace.columns[POSEIDON_COL_ADDR_LEFT_LO].push(F::from_usize(left_first_addr));
         trace.columns[POSEIDON_COL_ADDR_LEFT_HI].push(F::from_usize(left_second_addr));
         trace.columns[POSEIDON_COL_FLAG_PERMUTE].push(F::from_bool(permute));
-        // shout_lo/shout_hi filled in post-processing (depends on memory size)
-        for i in 0..N_POSEIDON_MEMORY_GROUPS {
-            trace.columns[POSEIDON_COL_SHOUT_LO_START + i].push(F::ZERO);
-            trace.columns[POSEIDON_COL_SHOUT_HI_START + i].push(F::ZERO);
-        }
         for (i, value) in input.iter().enumerate() {
             trace.columns[POSEIDON_COL_INPUT_START + i].push(*value);
         }
@@ -332,11 +306,6 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
             (POSEIDON_COL_NU_B, POSEIDON_COL_INPUT_START + DIGEST_LEN..POSEIDON_COL_OUT_LO),
             (POSEIDON_COL_NU_C, POSEIDON_COL_OUT_LO..POSEIDON_COL_OUT_LO + DIGEST_LEN * 2),
         ]
-    }
-    fn memory_shout_columns(&self) -> Vec<(usize, usize)> {
-        (0..N_POSEIDON_MEMORY_GROUPS)
-            .map(|g| (POSEIDON_COL_SHOUT_LO_START + g, POSEIDON_COL_SHOUT_HI_START + g))
-            .collect()
     }
     fn degree_air(&self) -> usize {
         // Last 4 output constraints (i in 4..8) are gated by the single linear factor
@@ -402,8 +371,6 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
     }
 }
 
-pub const N_POSEIDON_MEMORY_GROUPS: usize = 4;
-
 #[repr(C)]
 #[derive(Debug)]
 pub(super) struct Poseidon1Cols16<T> {
@@ -417,10 +384,6 @@ pub(super) struct Poseidon1Cols16<T> {
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    // d=2 Shout address decomposition: addr = shout_hi * sqrt(K) + shout_lo
-    // One pair per memory binding group (addr_left_lo, addr_left_hi, nu_b, nu_c)
-    pub shout_lo: [T; N_POSEIDON_MEMORY_GROUPS],
-    pub shout_hi: [T; N_POSEIDON_MEMORY_GROUPS],
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
