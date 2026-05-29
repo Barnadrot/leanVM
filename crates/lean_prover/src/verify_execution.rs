@@ -274,6 +274,27 @@ pub fn verify_execution(
             }
         }
 
+        // --- Shout address decomposition check ---
+        // Verify addr(r_air) = shout_hi(r_air) * sqrt(K) + shout_lo(r_air)
+        // for all committed shout columns. By Schwartz-Zippel over the random
+        // r_air, this ensures the row-wise decomposition is correct.
+        let half_bits = log_memory / 2;
+        let sqrt_k = EF::from_usize(1usize << half_bits);
+        for table in ALL_TABLES {
+            let groups = memory_binding_groups(&table);
+            let shout_cols = table.memory_shout_columns();
+            if groups.is_empty() { continue; }
+            let col_evals = &table_col_evals[&table];
+            for (g, group) in groups.iter().enumerate() {
+                let addr_eval = col_evals[group.addr_col];
+                let lo_eval = col_evals[shout_cols[g].0];
+                let hi_eval = col_evals[shout_cols[g].1];
+                if addr_eval != hi_eval * sqrt_k + lo_eval {
+                    return Err(ProofError::InvalidProof);
+                }
+            }
+        }
+
         mem_stmt
     };
 
