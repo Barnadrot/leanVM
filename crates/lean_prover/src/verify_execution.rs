@@ -181,29 +181,14 @@ pub fn verify_execution(
         let n_mem_groups = total_memory_binding_groups();
         let memory_size = 1usize << log_memory;
 
-        // --- V-4: Memory-bound value columns ---
+        // --- V-4: Memory-bound value columns (combined GKR-product sumcheck) ---
         let mem_stmt = if n_mem_groups > 0 {
             verifier_state.duplex();
             let c_bind: EF = verifier_state.sample();
-
-            for table in ALL_TABLES {
-                let groups = memory_binding_groups(&table);
-                let log_n = table_n_vars[&table];
-                for _group in &groups {
-                    let _pushforward = verifier_state.next_extension_scalars_vec(memory_size)?;
-
-                    verifier_state.duplex();
-                    let left = verify_gkr_quotient(&mut verifier_state, log_n)?;
-                    let right = verify_gkr_quotient(&mut verifier_state, log_memory)?;
-                    if !(left.0 + right.0).is_zero() {
-                        return Err(ProofError::InvalidProof);
-                    }
-                    verifier_state.duplex();
-                }
-            }
-
             verifier_state.duplex();
             let gamma: EF = verifier_state.sample();
+            verifier_state.duplex();
+            let alpha_bind: EF = verifier_state.sample();
 
             let batched_val = verifier_state.next_extension_scalar()?;
 
@@ -225,22 +210,30 @@ pub fn verify_execution(
                 return Err(ProofError::InvalidProof);
             }
 
-            let prod_eval = sumcheck_verify(
-                &mut verifier_state, log_memory, 2, batched_val, None,
-            )?;
+            // Left combined GKR: proves α*<P,memory> + Σ P/(c-j)
+            verifier_state.duplex();
+            let left = verify_gkr_quotient(&mut verifier_state, log_memory)?;
 
-            let p_eval = verifier_state.next_extension_scalar()?;
-            let m_eval = verifier_state.next_extension_scalar()?;
-            if prod_eval.value != p_eval * m_eval {
+            // Right GKR(s): one per table with memory groups
+            let mut total_right = EF::ZERO;
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                if groups.is_empty() { continue; }
+                let n_value_cols: usize = groups.iter().map(|g| g.value_cols.len()).sum();
+                if n_value_cols > 0 {
+                    let log_n = table_n_vars[&table];
+                    let right = verify_gkr_quotient(&mut verifier_state, log_n)?;
+                    total_right += right.0;
+                }
+            }
+
+            // Balance: left = alpha * batched_val + right (pushforward identity)
+            if !(left.0 - total_right - alpha_bind * batched_val).is_zero() {
                 return Err(ProofError::InvalidProof);
             }
             verifier_state.duplex();
 
-            Some(SparseStatement::new(
-                parsed_commitment.num_variables,
-                prod_eval.point,
-                vec![SparseValue::new(0, m_eval)],
-            ))
+            None
         } else {
             None
         };
@@ -269,27 +262,6 @@ pub fn verify_execution(
             let col_evals = &table_col_evals[&exec_table];
             for (k, &derived_k) in derived.iter().enumerate() {
                 if derived_k != col_evals[bc_range.start + k] {
-                    return Err(ProofError::InvalidProof);
-                }
-            }
-        }
-
-        // --- Shout address decomposition check ---
-        // Verify addr(r_air) = shout_hi(r_air) * sqrt(K) + shout_lo(r_air)
-        // for all committed shout columns. By Schwartz-Zippel over the random
-        // r_air, this ensures the row-wise decomposition is correct.
-        let half_bits = log_memory / 2;
-        let sqrt_k = EF::from_usize(1usize << half_bits);
-        for table in ALL_TABLES {
-            let groups = memory_binding_groups(&table);
-            let shout_cols = table.memory_shout_columns();
-            if groups.is_empty() { continue; }
-            let col_evals = &table_col_evals[&table];
-            for (g, group) in groups.iter().enumerate() {
-                let addr_eval = col_evals[group.addr_col];
-                let lo_eval = col_evals[shout_cols[g].0];
-                let hi_eval = col_evals[shout_cols[g].1];
-                if addr_eval != hi_eval * sqrt_k + lo_eval {
                     return Err(ProofError::InvalidProof);
                 }
             }

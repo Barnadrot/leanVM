@@ -154,3 +154,41 @@ pub fn total_memory_bound_value_cols() -> usize {
         .map(|g| g.value_cols.len())
         .sum()
 }
+
+pub fn compute_shout_pushforward(
+    shout_col: &[F],
+    half_bits: usize,
+    eq_r: &[EF],
+) -> Vec<EF> {
+    let s = 1usize << half_bits;
+    let mut p = EF::zero_vec(s);
+    for (i, &v) in shout_col.iter().enumerate() {
+        let j = v.to_usize();
+        if j < s {
+            p[j] += eq_r[i];
+        }
+    }
+    p
+}
+
+pub fn compute_batched_mem(
+    memory: &[F],
+    gamma: EF,
+    n_values: usize,
+) -> Vec<EF> {
+    let k_size = memory.len();
+    (0..k_size)
+        .into_par_iter()
+        .map(|j| {
+            let mut acc = EF::ZERO;
+            let mut gp = EF::ONE;
+            for k in 0..n_values {
+                if j + k < k_size {
+                    acc += gp * memory[j + k];
+                }
+                gp *= gamma;
+            }
+            acc
+        })
+        .collect()
+}

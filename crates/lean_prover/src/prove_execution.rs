@@ -263,29 +263,12 @@ pub fn prove_execution(
         let mem_stmt = if n_mem_groups > 0 {
             prover_state.duplex();
             let c_bind: EF = prover_state.sample();
-
-            for (table, groups) in &all_groups {
-                let trace = &traces[table];
-                let eq_r = &eq_rs[table];
-                for group in groups {
-                    let pushforward = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
-                        &trace.columns[group.addr_col], memory_size, eq_r,
-                    );
-                    prover_state.add_extension_scalars(&pushforward);
-
-                    prover_state.duplex();
-                    let (left, right) = sub_protocols::bytecode_binding::prove_logup_star_binding(
-                        &mut prover_state, eq_r,
-                        &trace.columns[group.addr_col], &pushforward, c_bind,
-                    );
-                    debug_assert!((left.0 + right.0).is_zero());
-                    prover_state.duplex();
-                }
-            }
-
             prover_state.duplex();
             let gamma: EF = prover_state.sample();
+            prover_state.duplex();
+            let alpha_bind: EF = prover_state.sample();
 
+            // Compute pushforward P_batched[j] and expected_batched_val from col_evals
             let mut p_batched = EF::zero_vec(memory_size);
             let mut expected_batched_val = EF::ZERO;
             let mut gamma_power = EF::ONE;
@@ -314,27 +297,103 @@ pub fn prove_execution(
                 "batched_val from pushforward must match col_evals for virtual value columns");
             prover_state.add_extension_scalar(batched_val);
 
-            let p_owned = MleOwned::Extension(p_batched);
-            let p_packed = p_owned.pack();
-            let m_owned = MleOwned::Base(memory.to_vec());
-            let m_packed = m_owned.pack();
+            // Combined GKR-product sumcheck (LEFT side):
+            // nums[j] = P[j] * (alpha * memory[j] * (c-j) + 1)
+            // dens[j] = (c - j)
+            // total = alpha * <P, memory> + Σ P[j]/(c-j)
+            let w = packing_width::<EF>();
+            let pivot = ENDIANNESS_PIVOT_GKR.min(log_memory);
+            let combined_nums: Vec<EF> = (0..memory_size)
+                .map(|j| p_batched[j] * (alpha_bind * EF::from(memory[j]) * (c_bind - EF::from_usize(j)) + EF::ONE))
+                .collect();
+            let combined_dens: Vec<EF> = (0..memory_size)
+                .map(|j| c_bind - EF::from_usize(j))
+                .collect();
 
-            let (prod_point, _, _, _) = backend::run_product_sumcheck(
-                &m_packed.by_ref(), &p_packed.by_ref(),
-                &mut prover_state, batched_val, log_memory, 0,
-            );
+            let pack_ef = |data: &[EF]| -> Vec<EFPacking<EF>> {
+                data.chunks_exact(w)
+                    .map(|chunk| {
+                        let mut acc = EFPacking::<EF>::ZERO;
+                        for (lane, &val) in chunk.iter().enumerate() {
+                            let mut basis = [F::ZERO; 4];
+                            basis[lane] = F::ONE;
+                            acc += EFPacking::<EF>::from(val) * EFPacking::<EF>::from(PFPacking::<EF>::from_fn(|l| basis[l]));
+                        }
+                        acc
+                    })
+                    .collect()
+            };
+            let nums_packed = pack_ef(&combined_nums);
+            let dens_packed = pack_ef(&combined_dens);
 
-            let p_eval = p_owned.by_ref().evaluate(&prod_point);
-            let m_eval = m_owned.by_ref().evaluate(&prod_point);
-            prover_state.add_extension_scalar(p_eval);
-            prover_state.add_extension_scalar(m_eval);
+            let br_packed = |data: &[EFPacking<EF>], piv: usize| -> Vec<EFPacking<EF>> {
+                let packed_len = data.len();
+                let chunk_packed = 1usize << (piv - packing_log_width::<EF>());
+                let shift = usize::BITS as usize - (piv - packing_log_width::<EF>());
+                let mut out = vec![EFPacking::<EF>::ZERO; packed_len];
+                for (c_idx, chunk) in data.chunks(chunk_packed).enumerate() {
+                    for (i, &val) in chunk.iter().enumerate() {
+                        let br_i = i.reverse_bits() >> shift;
+                        out[c_idx * chunk_packed + br_i] = val;
+                    }
+                }
+                out
+            };
+            let nums_br = br_packed(&nums_packed, pivot);
+            let dens_br = br_packed(&dens_packed, pivot);
+
+            prover_state.duplex();
+            let left = prove_gkr_quotient_ext(&mut prover_state, &nums_br, &dens_br, pivot);
+
+            // RIGHT side: one GKR per table (trace side)
+            // Σ_i eq_r[i] / (c_bind - addr[i]+k) for each (group, k)
+            let mut total_right = EF::ZERO;
+            let mut gp_global = EF::ONE;
+            for (table, groups) in &all_groups {
+                let trace = &traces[table];
+                let eq_r = &eq_rs[table];
+                let log_n = trace.log_n_rows;
+                let n_rows = 1usize << log_n;
+
+                let mut right_nums = EF::zero_vec(n_rows);
+                let mut right_dens = EF::zero_vec(n_rows);
+                let mut first_term = true;
+                for group in groups {
+                    for k in 0..group.value_cols.len() {
+                        let addr_col = &trace.columns[group.addr_col];
+                        for i in 0..n_rows {
+                            let addr_val = addr_col[i].to_usize() + k;
+                            let den_i = c_bind - EF::from_usize(addr_val);
+                            if first_term {
+                                right_nums[i] = gp_global * eq_r[i];
+                                right_dens[i] = den_i;
+                            } else {
+                                right_nums[i] = right_nums[i] * den_i + gp_global * eq_r[i] * right_dens[i];
+                                right_dens[i] = right_dens[i] * den_i;
+                            }
+                        }
+                        gp_global *= gamma;
+                        first_term = false;
+                    }
+                }
+
+                let right_nums_packed = pack_ef(&right_nums);
+                let right_dens_packed = pack_ef(&right_dens);
+                let pivot_right = ENDIANNESS_PIVOT_GKR.min(log_n);
+                let right_nums_br = br_packed(&right_nums_packed, pivot_right);
+                let right_dens_br = br_packed(&right_dens_packed, pivot_right);
+
+                let right = prove_gkr_quotient_ext(
+                    &mut prover_state, &right_nums_br, &right_dens_br, pivot_right,
+                );
+                total_right += right.0;
+            }
+
+            debug_assert!((left.0 - total_right - alpha_bind * batched_val).is_zero(),
+                "combined GKR balance: left - right - alpha*val must be zero");
             prover_state.duplex();
 
-            Some(SparseStatement::new(
-                stacked_pcs_witness.stacked_n_vars,
-                prod_point,
-                vec![SparseValue::new(0, m_eval)],
-            ))
+            None
         } else {
             None
         };
