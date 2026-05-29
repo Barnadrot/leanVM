@@ -105,11 +105,10 @@ pub fn verify_execution(
         verifier_state.duplex();
         // Left GKR (execution table, v=exec_n_vars)
         let left = verify_gkr_quotient(&mut verifier_state, exec_n_vars)?;
-        eprintln!("  verify binding left GKR: OK (quotient={:?})", left.0);
-        // Right GKR (bytecode table, v=bytecode_n_vars)
         let right = verify_gkr_quotient(&mut verifier_state, bytecode_n_vars)?;
-        eprintln!("  verify binding right GKR: OK (quotient={:?})", right.0);
-        // TODO: verify quotient balance and add PC claims to committed_statements
+        if !(left.0 + right.0).is_zero() {
+            return Err(ProofError::InvalidProof);
+        }
         verifier_state.duplex();
     }
 

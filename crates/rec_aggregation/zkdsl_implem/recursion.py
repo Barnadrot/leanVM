@@ -312,9 +312,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     fs = fs_duplex(fs)
     # Left: execution table (n_vars = log_n_cycles)
     fs, binding_left_q, binding_left_point, _, _ = verify_gkr_quotient(fs, log_n_cycles)
-    # Right: bytecode table (n_vars = LOG_GUEST_BYTECODE_LEN)
     fs, binding_right_q, binding_right_point, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
-    # TODO: check binding_left_q + binding_right_q == 0
+    binding_sum = add_extension_ret(binding_left_q, binding_right_q)
+    set_to_5_zeros(binding_sum)
     fs = fs_duplex(fs)
 
     # Memory Shout binding d=2 (Wiese, "Twist and Shout via logup*", §5.1)
