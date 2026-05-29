@@ -113,46 +113,56 @@ pub fn verify_execution(
         verifier_state.duplex();
     }
 
-    // --- Memory Shout binding verification ---
+    // --- Memory Shout binding d=2 verification ---
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
         let n_groups = total_memory_binding_groups();
+        let half_bits = log_memory / 2;
+        let s = 1usize << half_bits;
 
         if n_groups > 0 {
             verifier_state.duplex();
+
+            // Read P_hi per group (committed via FS absorption)
+            let mut _p_hi_all = Vec::new();
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                for _group in &groups {
+                    let p_hi = verifier_state.next_extension_scalars_vec(s)?;
+                    _p_hi_all.push(p_hi);
+                }
+            }
+
+            verifier_state.duplex();
+            let s_hi: Vec<EF> = verifier_state.sample_vec(half_bits);
+            verifier_state.duplex();
             let gamma: EF = verifier_state.sample();
 
-            let batched_val = compute_batched_val(
-                &logup_statements.columns_values,
-                &ALL_TABLES
-                    .iter()
-                    .filter_map(|t| {
-                        let g = memory_binding_groups(t);
-                        if g.is_empty() { None } else { Some((*t, g)) }
-                    })
-                    .collect::<Vec<_>>(),
-                gamma,
-            );
+            let weighted_batched_val = verifier_state.next_extension_scalar()?;
 
             let prod_eval = sumcheck_verify(
                 &mut verifier_state,
-                log_memory,
+                half_bits,
                 2,
-                batched_val,
+                weighted_batched_val,
                 None,
             )?;
 
-            let q_eval = verifier_state.next_extension_scalar()?;
-            let memory_eval_at_prod = verifier_state.next_extension_scalar()?;
-            if prod_eval.value != q_eval * memory_eval_at_prod {
+            let q_lo_eval = verifier_state.next_extension_scalar()?;
+            let m_slice_eval = verifier_state.next_extension_scalar()?;
+            if prod_eval.value != q_lo_eval * m_slice_eval {
                 return Err(ProofError::InvalidProof);
             }
             verifier_state.duplex();
 
+            let mut full_memory_point = s_hi;
+            full_memory_point.extend_from_slice(&prod_eval.point.0);
+            let full_memory_point = MultilinearPoint(full_memory_point);
+
             Some(SparseStatement::new(
                 parsed_commitment.num_variables,
-                prod_eval.point,
-                vec![SparseValue::new(0, memory_eval_at_prod)],
+                full_memory_point,
+                vec![SparseValue::new(0, m_slice_eval)],
             ))
         } else {
             None

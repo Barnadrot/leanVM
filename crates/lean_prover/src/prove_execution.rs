@@ -183,13 +183,14 @@ pub fn prove_execution(
         prover_state.duplex();
     }
 
-    // --- Memory Shout binding (Wiese, "Twist and Shout via logup*", §5.1) ---
+    // --- Memory Shout binding d=2 (Wiese, "Twist and Shout via logup*", §5.1) ---
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
         let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
         let mut eq_rs: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
         let memory_size = memory.len();
         let log_memory = log2_strict_usize(memory_size);
+        let half_bits = log_memory / 2;
 
         for table in ALL_TABLES {
             let groups = memory_binding_groups(&table);
@@ -206,50 +207,83 @@ pub fn prove_execution(
 
         let n_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
         if n_groups > 0 {
-            prover_state.duplex();
             let t_mem_bind = std::time::Instant::now();
+            prover_state.duplex();
+
+            // Step 1: Compute and absorb marginal pushforwards P_hi (size 2^half_bits each)
+            for (table, groups) in &all_groups {
+                let trace = &traces[table];
+                let eq_r = &eq_rs[table];
+                for group in groups {
+                    let p_hi = compute_pushforward_hi(
+                        &trace.columns[group.addr_col], half_bits, eq_r,
+                    );
+                    prover_state.add_extension_scalars(&p_hi);
+                }
+            }
+
+            // Step 2: Sample s_hi and γ
+            prover_state.duplex();
+            let s_hi: Vec<EF> = prover_state.sample_vec(half_bits);
+            prover_state.duplex();
             let gamma: EF = prover_state.sample();
+            let eq_s_hi = eval_eq(&s_hi);
 
-            let q = compute_batched_q_from_traces(&all_groups, &traces, &eq_rs, gamma, memory_size);
-            let batched_val = compute_batched_val(
-                &logup_statements.columns_values,
-                &all_groups,
-                gamma,
+            // Step 3: Fold memory to slice at s_hi (size 2^half_bits)
+            let t3 = std::time::Instant::now();
+            let m_slice = fold_memory_slice(&memory, &eq_s_hi, half_bits);
+            let t3_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+            // Step 4: Compute Q_lo (size 2^half_bits) with eq_{s_hi} weights
+            let t4 = std::time::Instant::now();
+            let q_lo = compute_q_lo_d2(
+                &all_groups, &traces, &eq_rs, &eq_s_hi, gamma, half_bits,
             );
+            let t4_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
-            let q_owned = MleOwned::Extension(q);
-            let q_packed = q_owned.pack();
-            let mem_owned = MleOwned::Base(memory.to_vec());
-            let mem_packed = mem_owned.pack();
+            // Step 5: Compute weighted_batched_val and send it
+            let weighted_batched_val = compute_weighted_batched_val(&q_lo, &m_slice);
+            prover_state.add_extension_scalar(weighted_batched_val);
 
-            let (prod_point, _prod_sum, _mem_folded, _q_folded) =
+            // Step 6: Product sumcheck at v=half_bits
+            let q_lo_owned = MleOwned::Extension(q_lo);
+            let q_lo_packed = q_lo_owned.pack();
+            let m_slice_owned = MleOwned::Extension(m_slice);
+            let m_slice_packed = m_slice_owned.pack();
+
+            let (prod_point, _prod_sum, _m_folded, _q_folded) =
                 backend::run_product_sumcheck(
-                    &mem_packed.by_ref(),
-                    &q_packed.by_ref(),
+                    &m_slice_packed.by_ref(),
+                    &q_lo_packed.by_ref(),
                     &mut prover_state,
-                    batched_val,
-                    log_memory,
+                    weighted_batched_val,
+                    half_bits,
                     0,
                 );
 
-            let q_eval = q_owned.by_ref().evaluate(&prod_point);
-            let memory_eval_at_prod = memory.evaluate(&prod_point);
-            prover_state.add_extension_scalar(q_eval);
-            prover_state.add_extension_scalar(memory_eval_at_prod);
+            // Step 7: Send endpoint evaluations
+            let q_lo_eval = q_lo_owned.by_ref().evaluate(&prod_point);
+            let m_slice_eval = m_slice_owned.by_ref().evaluate(&prod_point);
+            prover_state.add_extension_scalar(q_lo_eval);
+            prover_state.add_extension_scalar(m_slice_eval);
             prover_state.duplex();
 
+            // m_slice(s_lo) = memory(s_hi || s_lo) → WHIR claim at full memory point
+            let mut full_memory_point = s_hi.clone();
+            full_memory_point.extend_from_slice(&prod_point.0);
+            let full_memory_point = MultilinearPoint(full_memory_point);
+
             eprintln!(
-                "  Memory Shout binding: {:.0}ms (groups={}, memory_size={}, batched_val={:?})",
+                "  Memory Shout d=2: {:.0}ms (fold={:.0}ms q_lo={:.0}ms, groups={}, half_bits={})",
                 t_mem_bind.elapsed().as_secs_f64() * 1000.0,
-                n_groups,
-                memory_size,
-                batched_val,
+                t3_ms, t4_ms,
+                n_groups, half_bits,
             );
 
             Some(SparseStatement::new(
                 stacked_pcs_witness.stacked_n_vars,
-                prod_point,
-                vec![SparseValue::new(0, memory_eval_at_prod)],
+                full_memory_point,
+                vec![SparseValue::new(0, m_slice_eval)],
             ))
         } else {
             None

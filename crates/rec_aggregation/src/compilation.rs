@@ -473,6 +473,10 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             "MEM_BIND_VALUE_COLS_PLACEHOLDER".to_string(),
             format!("[{}]", mem_bind_value_cols_per_table.join(", ")),
         );
+        replacements.insert(
+            "MEM_BIND_HALF_BITS_MAX_PLACEHOLDER".to_string(),
+            (MAX_LOG_MEMORY_SIZE / 2).to_string(),
+        );
     }
     replacements.insert("STARTING_PC_PLACEHOLDER".to_string(), STARTING_PC.to_string());
     replacements.insert("ENDING_PC_PLACEHOLDER".to_string(), ending_pc.to_string());

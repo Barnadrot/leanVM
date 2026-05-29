@@ -1,7 +1,8 @@
 use backend::*;
-use lean_vm::{EF, F, DIGEST_LEN, Table, TableT, memory_lookup_groups};
+use lean_vm::{EF, F, Table, TableT, memory_lookup_groups};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
-use utils::{ToUsize, poseidon16_compress_pair};
+use utils::ToUsize;
 
 pub struct MemoryBindingGroup {
     pub addr_col: usize,
@@ -22,58 +23,52 @@ pub fn memory_binding_groups(table: &Table) -> Vec<MemoryBindingGroup> {
         .collect()
 }
 
-pub fn compute_memory_pushforward(
+pub fn compute_pushforward_hi(
     addr_col: &[F],
-    memory_size: usize,
+    half_bits: usize,
     eq_r: &[EF],
 ) -> Vec<EF> {
-    assert_eq!(addr_col.len(), eq_r.len());
-    let mut pushforward = EF::zero_vec(memory_size);
+    let s = 1usize << half_bits;
+    let mut p_hi = EF::zero_vec(s);
     for (i, &addr) in addr_col.iter().enumerate() {
-        let j = addr.to_usize();
-        if j < memory_size {
-            pushforward[j] += eq_r[i];
+        let h = addr.to_usize() >> half_bits;
+        if h < s {
+            p_hi[h] += eq_r[i];
         }
     }
-    pushforward
+    p_hi
 }
 
-pub fn hash_extension_vec(data: &[EF]) -> [F; DIGEST_LEN] {
-    use rayon::prelude::*;
-    let base_data = flatten_scalars_to_base(data);
-    let chunk_size = DIGEST_LEN;
-    let mut leaves: Vec<[F; DIGEST_LEN]> = base_data
-        .par_chunks(chunk_size)
-        .map(|chunk| {
-            let mut arr = [F::ZERO; DIGEST_LEN];
-            for (i, &v) in chunk.iter().enumerate() {
-                arr[i] = v;
+pub fn fold_memory_slice(
+    memory: &[F],
+    eq_s_hi: &[EF],
+    half_bits: usize,
+) -> Vec<EF> {
+    let s = 1usize << half_bits;
+    assert!(memory.len() >= s * s);
+    assert_eq!(eq_s_hi.len(), s);
+    (0..s)
+        .into_par_iter()
+        .map(|l| {
+            let mut acc = EF::ZERO;
+            for h in 0..s {
+                acc += eq_s_hi[h] * memory[h * s + l];
             }
-            arr
+            acc
         })
-        .collect();
-    while leaves.len() > 1 {
-        let next_len = (leaves.len() + 1) / 2;
-        let mut next: Vec<[F; DIGEST_LEN]> = Vec::with_capacity(next_len);
-        for i in 0..leaves.len() / 2 {
-            next.push(poseidon16_compress_pair(&leaves[2 * i], &leaves[2 * i + 1]));
-        }
-        if leaves.len() % 2 == 1 {
-            next.push(poseidon16_compress_pair(leaves.last().unwrap(), &[F::ZERO; DIGEST_LEN]));
-        }
-        leaves = next;
-    }
-    if leaves.is_empty() { [F::ZERO; DIGEST_LEN] } else { leaves[0] }
+        .collect()
 }
 
-pub fn compute_batched_q_from_traces(
+pub fn compute_q_lo_d2(
     all_groups: &[(Table, Vec<MemoryBindingGroup>)],
     traces: &BTreeMap<Table, lean_vm::TableTrace>,
     eq_rs: &BTreeMap<Table, Vec<EF>>,
+    eq_s_hi: &[EF],
     gamma: EF,
-    memory_size: usize,
+    half_bits: usize,
 ) -> Vec<EF> {
-    let mut q = EF::zero_vec(memory_size);
+    let s = 1usize << half_bits;
+    let mut q_lo = EF::zero_vec(s);
     let mut gamma_power = EF::ONE;
     for (table, groups) in all_groups {
         let trace = &traces[table];
@@ -81,37 +76,43 @@ pub fn compute_batched_q_from_traces(
         for group in groups {
             let addr_col = &trace.columns[group.addr_col];
             let n_values = group.value_cols.len();
-            for k in 0..n_values {
-                for (i, &addr) in addr_col.iter().enumerate() {
-                    let j = addr.to_usize();
-                    if j + k < memory_size {
-                        q[j + k] += gamma_power * eq_r[i];
+            let weighted: Vec<EF> = addr_col
+                .iter()
+                .enumerate()
+                .map(|(i, &addr)| {
+                    let h = addr.to_usize() >> half_bits;
+                    if h < s { eq_r[i] * eq_s_hi[h] } else { EF::ZERO }
+                })
+                .collect();
+            let gamma_base = gamma_power;
+            let mut gamma_powers_k = Vec::with_capacity(n_values);
+            for _ in 0..n_values {
+                gamma_powers_k.push(gamma_power);
+                gamma_power *= gamma;
+            }
+            for (i, &addr) in addr_col.iter().enumerate() {
+                if weighted[i].is_zero() { continue; }
+                let lo = addr.to_usize() & (s - 1);
+                let w = weighted[i];
+                for k in 0..n_values {
+                    let target = lo + k;
+                    if target < s {
+                        q_lo[target] += gamma_powers_k[k] * w;
                     }
                 }
-                gamma_power *= gamma;
             }
+            let _ = gamma_base;
         }
     }
-    q
+    q_lo
 }
 
-pub fn compute_batched_val(
-    columns_values: &BTreeMap<Table, BTreeMap<usize, EF>>,
-    groups: &[(Table, Vec<MemoryBindingGroup>)],
-    gamma: EF,
+pub fn compute_weighted_batched_val(
+    q_lo: &[EF],
+    m_slice: &[EF],
 ) -> EF {
-    let mut batched = EF::ZERO;
-    let mut gamma_power = EF::ONE;
-    for (table, table_groups) in groups {
-        let table_vals = &columns_values[table];
-        for group in table_groups {
-            for &val_col in &group.value_cols {
-                batched += gamma_power * table_vals[&val_col];
-                gamma_power *= gamma;
-            }
-        }
-    }
-    batched
+    assert_eq!(q_lo.len(), m_slice.len());
+    q_lo.iter().zip(m_slice.iter()).map(|(&q, &m)| q * m).sum()
 }
 
 pub fn total_memory_binding_groups() -> usize {
