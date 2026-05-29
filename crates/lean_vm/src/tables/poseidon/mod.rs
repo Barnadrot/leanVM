@@ -101,16 +101,16 @@ pub const POSEIDON_COL_NU_B: ColIndex = 1;
 pub const POSEIDON_COL_NU_C: ColIndex = 2;
 pub const POSEIDON_COL_ADDR_LEFT_LO: ColIndex = 3;
 pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 4;
-pub const POSEIDON_COL_INPUT_START: ColIndex = 5;
-pub const POSEIDON_COL_OUT_LO: ColIndex = 5 + WIDTH;
-pub const POSEIDON_COL_OUT_HI: ColIndex = 5 + WIDTH + WIDTH / 2;
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 5;
-// virtual control columns (not bus-referenced, AIR-only)
-// These are at FIXED struct positions after out_hi, independent of N_COMMITTED
-pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5 + WIDTH + WIDTH + 0; // = 37
-pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 5 + WIDTH + WIDTH + 1;  // = 38
-pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 5 + WIDTH + WIDTH + 2; // = 39
-pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 5 + WIDTH + WIDTH + 3; // = 40
+pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5;
+pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
+pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
+pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
+// 9..77: beginning_full_rounds (32) + partial_rounds (20) + ending_full_rounds (16) = 68 intermediates
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + HALF_INITIAL_FULL_ROUNDS * WIDTH + PARTIAL_ROUNDS + (HALF_FINAL_FULL_ROUNDS - 1) * WIDTH; // = 77
+// virtual columns (memory-bound via Shout)
+pub const POSEIDON_COL_INPUT_START: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
+pub const POSEIDON_COL_OUT_LO: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH + WIDTH / 2;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -374,24 +374,23 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
 #[repr(C)]
 #[derive(Debug)]
 pub(super) struct Poseidon1Cols16<T> {
-    // committed columns (stacked in PCS, bus-referenced)
+    // committed columns (stacked in PCS)
     pub multiplicity: T,
     pub nu_b: T,
     pub nu_c: T,
     pub addr_left_lo: T,
     pub addr_left_hi: T,
-    pub inputs: [T; WIDTH],
-    pub out_lo: [T; WIDTH / 2],
-    pub out_hi: [T; WIDTH / 2],
-    // virtual control columns (AIR-only, no bus reference)
     pub flag_short: T,
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    // virtual intermediate columns
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
+    // virtual columns (memory-bound via Shout)
+    pub inputs: [T; WIDTH],
+    pub out_lo: [T; WIDTH / 2],
+    pub out_hi: [T; WIDTH / 2],
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {
