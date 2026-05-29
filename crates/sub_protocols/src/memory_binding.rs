@@ -77,7 +77,7 @@ pub fn compute_q_lo_d2(
             let addr_col = &trace.columns[group.addr_col];
             let n_values = group.value_cols.len();
             let weighted: Vec<EF> = addr_col
-                .iter()
+                .par_iter()
                 .enumerate()
                 .map(|(i, &addr)| {
                     let h = addr.to_usize() >> half_bits;
