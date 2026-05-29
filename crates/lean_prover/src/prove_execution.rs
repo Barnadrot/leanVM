@@ -12,7 +12,6 @@ use utils::{from_end, get_poseidon16};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionProof {
     pub proof: Proof<F>,
-    // benchmark / debug purpose
     #[serde(skip, default)]
     pub metadata: Option<ExecutionMetadata>,
 }
@@ -184,6 +183,90 @@ pub fn prove_execution(
         prover_state.duplex();
     }
 
+    // --- Memory Shout binding (Wiese, "Twist and Shout via logup*", §5.1) ---
+    let memory_binding_statement = {
+        use sub_protocols::memory_binding::*;
+        let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
+        let mut all_pushforwards: Vec<Vec<EF>> = Vec::new();
+        let memory_size = memory.len();
+
+        for table in ALL_TABLES {
+            let groups = memory_binding_groups(&table);
+            if groups.is_empty() {
+                continue;
+            }
+            let trace = &traces[&table];
+            let log_n_rows = trace.log_n_rows;
+            let inner_point = MultilinearPoint(from_end(gkr_point, log_n_rows).to_vec());
+            let eq_r = eval_eq(&inner_point.0);
+
+            for group in &groups {
+                let addr_col = &trace.columns[group.addr_col];
+                let pf = compute_memory_pushforward(addr_col, memory_size, &eq_r);
+                all_pushforwards.push(pf);
+            }
+            all_groups.push((table, groups));
+        }
+
+        if !all_pushforwards.is_empty() {
+            let t_mem_bind = std::time::Instant::now();
+            prover_state.duplex();
+            for pf in &all_pushforwards {
+                prover_state.add_extension_scalars(pf);
+            }
+            let gamma: EF = prover_state.sample();
+
+            let group_value_counts: Vec<usize> = all_groups
+                .iter()
+                .flat_map(|(_, gs)| gs.iter().map(|g| g.value_cols.len()))
+                .collect();
+
+            let q = compute_batched_q(&all_pushforwards, &group_value_counts, gamma, memory_size);
+            let batched_val = compute_batched_val(
+                &logup_statements.columns_values,
+                &all_groups,
+                gamma,
+            );
+
+            let q_owned = MleOwned::Extension(q);
+            let q_packed = q_owned.pack();
+            let mem_ext: Vec<EF> = memory.iter().map(|&x| EF::from(x)).collect();
+            let mem_owned = MleOwned::Extension(mem_ext);
+            let mem_packed = mem_owned.pack();
+            let log_memory = log2_strict_usize(memory_size);
+
+            let (prod_point, _prod_sum, _q_folded, _mem_folded) =
+                backend::run_product_sumcheck(
+                    &q_packed.by_ref(),
+                    &mem_packed.by_ref(),
+                    &mut prover_state,
+                    batched_val,
+                    log_memory,
+                    0,
+                );
+
+            let memory_eval_at_prod = memory.evaluate(&prod_point);
+            prover_state.add_extension_scalar(memory_eval_at_prod);
+            prover_state.duplex();
+
+            eprintln!(
+                "  Memory Shout binding: {:.0}ms (groups={}, pushforward_size={}, batched_val={:?})",
+                t_mem_bind.elapsed().as_secs_f64() * 1000.0,
+                all_pushforwards.len(),
+                memory_size,
+                batched_val,
+            );
+
+            Some(SparseStatement::new(
+                stacked_pcs_witness.stacked_n_vars,
+                prod_point,
+                vec![SparseValue::new(0, memory_eval_at_prod)],
+            ))
+        } else {
+            None
+        }
+    };
+
     let mut committed_statements: CommittedStatements = Default::default();
     for table in ALL_TABLES {
         let log_n_rows = traces[&table].log_n_rows;
@@ -277,7 +360,7 @@ pub fn prove_execution(
     let public_memory_random_point = MultilinearPoint(prover_state.sample_vec(log2_strict_usize(PUBLIC_INPUT_LEN)));
     let public_memory_eval = (&memory[..PUBLIC_INPUT_LEN]).evaluate(&public_memory_random_point);
 
-    let previous_statements = vec![
+    let mut previous_statements = vec![
         SparseStatement::new(
             stacked_pcs_witness.stacked_n_vars,
             logup_statements.memory_and_acc_point,
@@ -300,6 +383,9 @@ pub fn prove_execution(
             )],
         ),
     ];
+    if let Some(mem_bind_stmt) = memory_binding_statement {
+        previous_statements.push(mem_bind_stmt);
+    }
 
     let global_statements_base = stacked_pcs_global_statements(
         stacked_pcs_witness.stacked_n_vars,

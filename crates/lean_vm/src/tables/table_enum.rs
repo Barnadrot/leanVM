@@ -99,6 +99,9 @@ impl Air for Table {
     fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
         delegate_to_inner!(self, bytecode_bound_columns)
     }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        delegate_to_inner!(self, memory_bound_columns)
+    }
     fn n_constraints(&self) -> usize {
         delegate_to_inner!(self, n_constraints)
     }
@@ -186,22 +189,15 @@ mod tests {
                         }
                     }
                     BusMultiplicity::One => {
-                        // Multiplicity::One bus: column evaluations at the GKR
-                        // point become WHIR opening claims. PCS binding is
-                        // required for input consistency between AIR and LOGUP.
-                        // Exceptions:
-                        // - bytecode_bound_columns: bound via LOGUP* pushforward
-                        //   (eprint 2025/946)
-                        // - memory lookup value columns: bound via Shout protocol
-                        //   (Wiese, "Twist and Shout via logup*", §5.1)
                         let bc_bound = table.bytecode_bound_columns();
-                        let is_memory_bus = bus.is_memory_lookup();
+                        let mem_bound = table.memory_bound_columns();
                         for &col in &bus_cols {
                             let is_bytecode_bound =
                                 bc_bound.as_ref().is_some_and(|range| range.contains(&col));
-                            let is_memory_value = is_memory_bus && col >= n_committed;
+                            let is_memory_bound =
+                                mem_bound.iter().any(|(_, range)| range.contains(&col));
                             assert!(
-                                col < n_committed || is_bytecode_bound || is_memory_value,
+                                col < n_committed || is_bytecode_bound || is_memory_bound,
                                 "SOUNDNESS: table {}: Multiplicity::One bus references col {} \
                                  which is outside the committed range [0, {}) and not \
                                  bytecode-bound or memory-bound.",

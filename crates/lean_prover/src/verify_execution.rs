@@ -113,6 +113,71 @@ pub fn verify_execution(
         verifier_state.duplex();
     }
 
+    // --- Memory Shout binding verification ---
+    let memory_binding_statement = {
+        use sub_protocols::memory_binding::*;
+        let mut all_groups: Vec<(Table, Vec<MemoryBindingGroup>)> = Vec::new();
+        let mut pushforward_sizes: Vec<usize> = Vec::new();
+        let memory_size = 1 << log_memory;
+
+        for table in ALL_TABLES {
+            let groups = memory_binding_groups(&table);
+            if groups.is_empty() {
+                continue;
+            }
+            for _group in &groups {
+                pushforward_sizes.push(memory_size);
+            }
+            all_groups.push((table, groups));
+        }
+
+        if !pushforward_sizes.is_empty() {
+            verifier_state.duplex();
+            let mut all_pushforwards: Vec<Vec<EF>> = Vec::new();
+            for &pf_size in &pushforward_sizes {
+                let pf = verifier_state.next_extension_scalars_vec(pf_size)?;
+                all_pushforwards.push(pf);
+            }
+            let gamma: EF = verifier_state.sample();
+
+            let group_value_counts: Vec<usize> = all_groups
+                .iter()
+                .flat_map(|(_, gs)| gs.iter().map(|g| g.value_cols.len()))
+                .collect();
+
+            let q = compute_batched_q(&all_pushforwards, &group_value_counts, gamma, memory_size);
+            let batched_val = compute_batched_val(
+                &logup_statements.columns_values,
+                &all_groups,
+                gamma,
+            );
+
+            let prod_eval = sumcheck_verify(
+                &mut verifier_state,
+                log_memory,
+                2,
+                batched_val,
+                None,
+            )?;
+
+            let memory_eval_at_prod = verifier_state.next_extension_scalar()?;
+            let q_eval = q.evaluate(&prod_eval.point);
+            if prod_eval.value != q_eval * memory_eval_at_prod {
+                eprintln!("  Memory Shout binding: product sumcheck final check FAILED");
+                return Err(ProofError::InvalidProof);
+            }
+            verifier_state.duplex();
+
+            Some(SparseStatement::new(
+                parsed_commitment.num_variables,
+                prod_eval.point,
+                vec![SparseValue::new(0, memory_eval_at_prod)],
+            ))
+        } else {
+            None
+        }
+    };
+
     let mut committed_statements: CommittedStatements = Default::default();
     for table in ALL_TABLES {
         let log_n = table_n_vars[&table];
@@ -200,7 +265,7 @@ pub fn verify_execution(
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));
     let public_memory_eval = public_input.evaluate(&public_memory_random_point);
 
-    let previous_statements = vec![
+    let mut previous_statements = vec![
         SparseStatement::new(
             parsed_commitment.num_variables,
             logup_statements.memory_and_acc_point,
@@ -223,6 +288,10 @@ pub fn verify_execution(
             )],
         ),
     ];
+    let has_memory_binding = memory_binding_statement.is_some();
+    if let Some(mem_bind_stmt) = memory_binding_statement {
+        previous_statements.push(mem_bind_stmt);
+    }
 
     let global_statements_base = stacked_pcs_global_statements(
         parsed_commitment.num_variables,
@@ -236,7 +305,8 @@ pub fn verify_execution(
 
     // sanity check (not necessary for soundness)
     let num_whir_statements = global_statements_base.iter().map(|s| s.values.len()).sum::<usize>();
-    assert_eq!(num_whir_statements, total_whir_statements());
+    let expected = total_whir_statements() + if has_memory_binding { 1 } else { 0 };
+    assert_eq!(num_whir_statements, expected);
 
     WhirConfig::new(&whir_config, parsed_commitment.num_variables).verify(
         &mut verifier_state,

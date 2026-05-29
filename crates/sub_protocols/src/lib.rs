@@ -3,6 +3,7 @@ mod air_sumcheck;
 pub use air_sumcheck::*;
 
 pub mod bytecode_binding;
+pub mod memory_binding;
 
 mod logup;
 pub use logup::*;

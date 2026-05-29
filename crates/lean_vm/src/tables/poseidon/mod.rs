@@ -299,6 +299,14 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
     fn n_committed_columns(&self) -> usize {
         N_COMMITTED_COLS_POSEIDON_16
     }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        vec![
+            (POSEIDON_COL_ADDR_LEFT_LO, POSEIDON_COL_INPUT_START..POSEIDON_COL_INPUT_START + HALF_DIGEST_LEN),
+            (POSEIDON_COL_ADDR_LEFT_HI, POSEIDON_COL_INPUT_START + HALF_DIGEST_LEN..POSEIDON_COL_INPUT_START + DIGEST_LEN),
+            (POSEIDON_COL_NU_B, POSEIDON_COL_INPUT_START + DIGEST_LEN..POSEIDON_COL_OUT_LO),
+            (POSEIDON_COL_NU_C, POSEIDON_COL_OUT_LO..POSEIDON_COL_OUT_LO + DIGEST_LEN * 2),
+        ]
+    }
     fn degree_air(&self) -> usize {
         // Last 4 output constraints (i in 4..8) are gated by the single linear factor
         // `(1 - flag_permute - flag_short)`, which is boolean thanks to the mutex

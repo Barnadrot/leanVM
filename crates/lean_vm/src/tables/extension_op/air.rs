@@ -45,7 +45,14 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         29
     }
     fn n_committed_columns(&self) -> usize {
-        COL_IDX_RES + 1 // 14: shift cols + idx_res, memory value cols are virtual
+        COL_IDX_RES + 1
+    }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        vec![
+            (COL_IDX_A, COL_V_A..COL_V_A + crate::DIMENSION),
+            (COL_IDX_B, COL_V_B..COL_V_B + crate::DIMENSION),
+            (COL_IDX_RES, COL_RES..COL_RES + crate::DIMENSION),
+        ]
     }
     fn degree_air(&self) -> usize {
         6

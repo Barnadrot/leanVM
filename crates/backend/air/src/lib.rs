@@ -38,6 +38,10 @@ pub trait Air: Send + Sync + 'static {
         None
     }
 
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        vec![]
+    }
+
     /// If the AIR contains a `low_degree_block` sub-region, returns `(degree, n_constraints)`
     fn low_degree_air(&self) -> Option<(usize, usize)> {
         None
