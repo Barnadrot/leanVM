@@ -178,10 +178,8 @@ def pos_gkr_verify_endpoint(claimed, trans_out, eq_p_el, p_row, challenges, n_va
     h_val: Mut = ZERO_VEC_PTR
     for k in unroll(0, 16):
         h_val = add_extension_ret(h_val, mul_extension_ret(eq_p_el + k * DIM, trans_out + k * DIM))
-    ch_rev = Array(n_vars * DIM)
-    for i in range(0, n_vars):
-        copy_5(challenges + (n_vars - 1 - i) * DIM, ch_rev + i * DIM)
-    eq_val = pos_eq_at_point(p_row, ch_rev, n_vars)
+    # Product sumcheck produces MSB-first challenges — no reversal needed
+    eq_val = pos_eq_at_point(p_row, challenges, n_vars)
     expected = mul_extension_ret(eq_val, h_val)
     copy_5(claimed, expected)
     return 0
@@ -562,7 +560,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     copy_5(bc_balance, bc_expected_balance)
     fs = fs_duplex(fs)
 
-    # Phase 3: Poseidon GKR — 27 transitions (single rounds, max degree 4)
+    # Phase 3: Poseidon GKR — 29 product sumchecks (degree 2)
     POSEIDON_TABLE_INDEX = 2
     poseidon_log_n = table_log_heights[POSEIDON_TABLE_INDEX]
     fs = fs_duplex(fs)
@@ -574,137 +572,124 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_claimed: Mut
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
 
-    # t=28: ending full round 3 (final_rc[3]), degree 4
     sc_ch: Mut
     sc_cl: Mut
-    ie: Mut
+    cp_t: Mut
     out: Mut
     alpha: Mut
-    rev: Mut
-    pos_p_row_tmp: Mut
-    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-    fs, ie = fs_receive_ef_inlined(fs, 16)
-    out = pos_single_full_round_final(ie, 3)
+
+    # Helper: verify one product-sumcheck transition
+    # 1. sumcheck_verify(degree=2)
+    # 2. receive cp_t(r) (16 EF)
+    # 3. compute T_t(cp_t(r)) → trans_out
+    # 4. h_expected = <eq_p_el, trans_out>
+    # 5. eq_at = eq(p_row, sc_ch)
+    # 6. check sc_cl == eq_at * h_expected
+    # 7. duplex + sample alpha, update p_row and eq_p_el
+
+    # t=28: ending full round 3
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+    fs, cp_t = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(cp_t, 3)
     _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
     fs, alpha = fs_sample_many_ef(fs, 4)
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
-    pos_p_row_tmp = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
-    pos_p_row = pos_p_row_tmp
+    pos_p_row = sc_ch
 
-    # t=27: ending full round 2 (final_rc[2]), degree 4
+    # t=27: ending full round 2
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-    fs, ie = fs_receive_ef_inlined(fs, 16)
-    out = pos_single_full_round_final(ie, 2)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+    fs, cp_t = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(cp_t, 2)
     _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
     fs, alpha = fs_sample_many_ef(fs, 4)
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
-    pos_p_row_tmp = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
-    pos_p_row = pos_p_row_tmp
+    pos_p_row = sc_ch
 
-    # t=26: ending full round 1 (final_rc[1]), degree 4
+    # t=26: ending full round 1
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-    fs, ie = fs_receive_ef_inlined(fs, 16)
-    out = pos_single_full_round_final(ie, 1)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+    fs, cp_t = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(cp_t, 1)
     _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
     fs, alpha = fs_sample_many_ef(fs, 4)
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
-    rev = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
-    pos_p_row = rev
+    pos_p_row = sc_ch
 
-    # t=25: ending full round 0 (final_rc[0]), degree 4
+    # t=25: ending full round 0
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-    fs, ie = fs_receive_ef_inlined(fs, 16)
-    out = pos_single_full_round_final(ie, 0)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+    fs, cp_t = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(cp_t, 0)
     _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
     fs, alpha = fs_sample_many_ef(fs, 4)
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
-    rev = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
-    pos_p_row = rev
+    pos_p_row = sc_ch
 
-    # t=24..5: 20 partial rounds (reverse), degree 4
+    # t=24..5: 20 partial rounds (reverse), degree 2
     for pr_idx in unroll(0, 20):
         fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-        fs, sc_ch_pr, sc_cl_pr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-        fs, ie_pr = fs_receive_ef_inlined(fs, 16)
-        pr_sq = mul_extension_ret(ie_pr, ie_pr)
-        pr_cubed: Mut = mul_extension_ret(pr_sq, ie_pr)
+        fs, sc_ch_pr, sc_cl_pr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+        fs, cp_t_pr = fs_receive_ef_inlined(fs, 16)
+        pr_sq = mul_extension_ret(cp_t_pr, cp_t_pr)
+        pr_cubed: Mut = mul_extension_ret(pr_sq, cp_t_pr)
         if 0 < pr_idx:
             pr_cubed = add_base_extension_ret(POS_SCALAR_RC[19 - pr_idx], pr_cubed)
         pr_old_s0 = pr_cubed
         pr_new_s0: Mut = ZERO_VEC_PTR
         for j in unroll(0, 16):
-            pr_src: Mut = ie_pr + j * DIM
+            pr_src: Mut = cp_t_pr + j * DIM
             if j == 0:
                 pr_src = pr_cubed
             pr_new_s0 = add_extension_ret(pr_new_s0, mul_base_extension_ret(POS_FIRST_ROWS_FLAT[(19 - pr_idx) * 16 + j], pr_src))
         pr_out = Array(16 * DIM)
         copy_5(pr_new_s0, pr_out)
         for j in unroll(1, 16):
-            pr_updated = add_extension_ret(ie_pr + j * DIM, mul_base_extension_ret(POS_V_VECS_FLAT[(19 - pr_idx) * 16 + j - 1], pr_old_s0))
+            pr_updated = add_extension_ret(cp_t_pr + j * DIM, mul_base_extension_ret(POS_V_VECS_FLAT[(19 - pr_idx) * 16 + j - 1], pr_old_s0))
             copy_5(pr_updated, pr_out + j * DIM)
         _ = pos_gkr_verify_endpoint(sc_cl_pr, pr_out, pos_eq_p_el, pos_p_row, sc_ch_pr, poseidon_log_n)
         fs = fs_duplex(fs)
         fs, alpha_pr = fs_sample_many_ef(fs, 4)
         pos_eq_p_el = compute_eq_mle_extension(alpha_pr, 4)
-        pr_rev = Array(poseidon_log_n * DIM)
-        for i in range(0, poseidon_log_n):
-            copy_5(sc_ch_pr + (poseidon_log_n - 1 - i) * DIM, pr_rev + i * DIM)
-        pos_p_row = pr_rev
+        pos_p_row = sc_ch_pr
 
     # t=4: linear transition, degree 2
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
-    fs, ie = fs_receive_ef_inlined(fs, 16)
-    out = pos_linear_transition(ie)
+    fs, cp_t = fs_receive_ef_inlined(fs, 16)
+    out = pos_linear_transition(cp_t)
     _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
     fs, alpha = fs_sample_many_ef(fs, 4)
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
-    rev = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
-    pos_p_row = rev
+    pos_p_row = sc_ch
 
-    # t=3..0: 4 beginning full rounds (reverse), degree 4
+    # t=3..0: 4 beginning full rounds (reverse), degree 2
     pos_gkr_input_evals: Mut = ZERO_VEC_PTR
     for fr_idx in unroll(0, 4):
         fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-        fs, sc_ch_fr, sc_cl_fr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
-        fs, ie_fr = fs_receive_ef_inlined(fs, 16)
+        fs, sc_ch_fr, sc_cl_fr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+        fs, cp_t_fr = fs_receive_ef_inlined(fs, 16)
         if fr_idx == 3:
-            pos_gkr_input_evals = ie_fr
-        out_fr: Mut = ie_fr
+            pos_gkr_input_evals = cp_t_fr
+        out_fr: Mut = cp_t_fr
         if fr_idx == 0:
-            out_fr = pos_single_full_round_initial(ie_fr, 3)
+            out_fr = pos_single_full_round_initial(cp_t_fr, 3)
         if fr_idx == 1:
-            out_fr = pos_single_full_round_initial(ie_fr, 2)
+            out_fr = pos_single_full_round_initial(cp_t_fr, 2)
         if fr_idx == 2:
-            out_fr = pos_single_full_round_initial(ie_fr, 1)
+            out_fr = pos_single_full_round_initial(cp_t_fr, 1)
         if fr_idx == 3:
-            out_fr = pos_single_full_round_initial(ie_fr, 0)
+            out_fr = pos_single_full_round_initial(cp_t_fr, 0)
         _ = pos_gkr_verify_endpoint(sc_cl_fr, out_fr, pos_eq_p_el, pos_p_row, sc_ch_fr, poseidon_log_n)
         fs = fs_duplex(fs)
         fs, alpha_fr = fs_sample_many_ef(fs, 4)
         pos_eq_p_el = compute_eq_mle_extension(alpha_fr, 4)
-        fr_rev = Array(poseidon_log_n * DIM)
-        for i in range(0, poseidon_log_n):
-            copy_5(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
-        pos_p_row = fr_rev
+        pos_p_row = sc_ch_fr
 
     # GKR endpoint inputs verified via WHIR (N_COMMITTED=25)
     fs = fs_duplex(fs)
