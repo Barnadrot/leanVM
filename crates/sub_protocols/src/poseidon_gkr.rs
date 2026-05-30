@@ -422,7 +422,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             challenges.push(r_v);
             let one_minus_r = EF::ONE - r_v;
             // Fold from F to EF using the challenge
-            eq_table = eq_table.par_chunks_exact(2).map(|pair| pair[0] * one_minus_r + pair[1] * r_v).collect();
+            eq_table = eq_table.par_chunks_exact(2).map(|pair| pair[0] + (pair[1] - pair[0]) * r_v).collect();
             current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
         }
 
@@ -479,12 +479,12 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
                 let mut new_prev: Vec<[EF; WIDTH]> = Vec::with_capacity(half);
                 unsafe { new_eq.set_len(half); new_prev.set_len(half); }
                 new_eq.par_iter_mut().zip(new_prev.par_iter_mut()).enumerate().for_each(|(h, (eq_out, prev_out))| {
-                    *eq_out = eq_table[2*h] * one_minus_r + eq_table[2*h+1] * r_v;
-                    *prev_out = std::array::from_fn(|k| folded_prev[2*h][k] * one_minus_r + folded_prev[2*h+1][k] * r_v);
+                    *eq_out = eq_table[2*h] + (eq_table[2*h+1] - eq_table[2*h]) * r_v;
+                    *prev_out = std::array::from_fn(|k| folded_prev[2*h][k] + (folded_prev[2*h+1][k] - folded_prev[2*h][k]) * r_v);
                 });
                 eq_table = new_eq; folded_prev = new_prev;
             } else {
-                for h in 0..half { eq_table[h] = eq_table[2*h] * one_minus_r + eq_table[2*h+1] * r_v; for k in 0..WIDTH { folded_prev[h][k] = folded_prev[2*h][k] * one_minus_r + folded_prev[2*h+1][k] * r_v; } }
+                for h in 0..half { eq_table[h] = eq_table[2*h] + (eq_table[2*h+1] - eq_table[2*h]) * r_v; for k in 0..WIDTH { folded_prev[h][k] = folded_prev[2*h][k] + (folded_prev[2*h+1][k] - folded_prev[2*h][k]) * r_v; } }
                 eq_table.truncate(half); folded_prev.truncate(half);
             }
             current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
