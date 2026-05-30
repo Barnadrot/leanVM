@@ -137,13 +137,9 @@ impl TransitionPrecomp {
     }
 }
 
-/// Bare polynomial evaluation (WITHOUT eq linear factor) for base-field round.
-/// Multiplied by eq_rem = eq_table[2h] + eq_table[2h+1] per pack.
+/// Bare eval for base-field round with pre-packed eq_remaining
 #[inline(always)]
-fn bare_eval_base(prev: &[[F; WIDTH]], eq_table: &[EF], pre: &TransitionPrecomp, start: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
-    let eq_rem_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i|
-        eq_table[2 * (start + i)] + eq_table[2 * (start + i) + 1]
-    ));
+fn bare_eval_base_direct(prev: &[[F; WIDTH]], eq_rem_p: PEF, pre: &TransitionPrecomp, start: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
     let mut a_bf = [PBF::default(); WIDTH]; let mut d_bf = [PBF::default(); WIDTH];
     for k in 0..WIDTH {
         a_bf[k] = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[2 * (start + i)][k]));
@@ -291,23 +287,27 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
         let n = 1usize << log_n_rows;
         if t < N_TRANSITIONS - 1 { prover_state.add_extension_scalar(current_claim); }
 
-        let mut eq_table = eval_eq(&p_row);
+        // Compute eq_remaining directly (half size): eq_remaining[h] = eval_eq(p_row[0..n-1])[h]
+        // This equals eval_eq(p_row)[2h] + eval_eq(p_row)[2h+1], saving 50% of eval_eq work
+        let mut eq_table = eval_eq(&p_row[..log_n_rows - 1]);
         let mut challenges = Vec::with_capacity(log_n_rows);
         let pre = TransitionPrecomp::new(&eq_p_el, t, &c);
         let mut mmf = EF::ONE;
 
-        // All rounds use SplitEq: bare polynomial (degree-1) + eq_alpha
-        // Base-field round 0
+        // Base-field round 0 with SplitEq (uses eq_table as eq_remaining directly)
         {
             let half = n >> 1;
             let n_evals = bd;
-            let eq_alpha = p_row[log_n_rows - 1]; // LSB-first: round 0 uses last p_row element
+            let eq_alpha = p_row[log_n_rows - 1];
             let n_packed_bf = half / BF_PACK_WIDTH;
 
             let mut raw_evals: Vec<EF> = if n_packed_bf >= RAYON_CHUNK / BF_PACK_WIDTH {
                 let packed_sums = (0..n_packed_bf).into_par_iter()
                     .fold(|| [PEF::default(); 5], |mut acc, p| {
-                        let contrib = bare_eval_base(prev, &eq_table, &pre, p * BF_PACK_WIDTH, t, n_evals, &c);
+                        let start = p * BF_PACK_WIDTH;
+                        // eq_table[h] IS eq_remaining[h] — no need to sum pairs
+                        let eq_rem_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[start + i]));
+                        let contrib = bare_eval_base_direct(prev, eq_rem_p, &pre, start, t, n_evals, &c);
                         for point in 0..n_evals { acc[point] += contrib[point]; } acc
                     })
                     .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
@@ -317,10 +317,9 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             } else {
                 let mut evals = vec![EF::ZERO; n_evals];
                 for h in 0..half {
-                    let eq_rem = eq_table[2*h] + eq_table[2*h+1];
                     let a: [EF; WIDTH] = std::array::from_fn(|k| EF::from(prev[2*h][k]));
                     let b: [EF; WIDTH] = std::array::from_fn(|k| EF::from(prev[2*h+1][k]));
-                    let contrib = bare_eval_scalar(&a, &b, eq_rem, &eq_p_el, t, n_evals, &c);
+                    let contrib = bare_eval_scalar(&a, &b, eq_table[h], &eq_p_el, t, n_evals, &c);
                     for point in 0..n_evals { evals[point] += contrib[point]; }
                 }
                 for e in evals.iter_mut() { *e *= mmf; }
@@ -335,7 +334,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let eq_eval = (EF::ONE - eq_alpha) * (EF::ONE - r_v) + eq_alpha * r_v;
             current_claim = eq_eval * bare_coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
             mmf *= eq_eval;
-            eq_table = eq_table.par_chunks_exact(2).map(|p| p[0] + p[1]).collect();
+            // eq_table is already at size n/2 — no fold needed (it was computed as eval_eq of n-1 vars)
         }
 
         // Fold from F to EF
