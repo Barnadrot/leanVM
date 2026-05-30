@@ -60,60 +60,41 @@ fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec
     let mut checkpoints: Vec<Vec<[F; WIDTH]>> = (0..N_TRANSITIONS + 1)
         .map(|_| unsafe { let mut v = Vec::with_capacity(n_rows); v.set_len(n_rows); v })
         .collect();
-    // Initialize checkpoint 0 from input columns
-    for i in 0..n_rows { checkpoints[0][i] = std::array::from_fn(|k| input_cols[k][i]); }
-    let mut cp_idx = 0;
-    for r in 0..4 {
-        let (src, dst) = if cp_idx + 1 < checkpoints.len() {
-            let (left, right) = checkpoints.split_at_mut(cp_idx + 1);
-            (&left[cp_idx], &mut right[0])
-        } else { unreachable!() };
-        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
-            *d = *s;
-            for k in 0..WIDTH { d[k] += c.initial_rc[r][k]; d[k] = d[k].cube(); }
-            mds_circ_16(d);
-        });
-        cp_idx += 1;
-    }
-    {
-        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
-        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
-            *d = *s;
-            for (ds, &rc) in d.iter_mut().zip(c.frc.iter()) { *ds += rc; }
-            let inp = *d;
-            for k in 0..WIDTH { d[k] = F::ZERO; for j in 0..WIDTH { d[k] += inp[j] * c.m_i[k][j]; } }
-        });
-        cp_idx += 1;
-    }
-    // Compute all 20 partial rounds in a single parallel pass per row
-    {
-        let partial_start = cp_idx;
-        let (prefix, partial_cps) = checkpoints.split_at_mut(partial_start + 1);
-        let src = &prefix[partial_start];
-        (0..n_rows).into_par_iter().for_each(|i| {
-            let mut state = src[i];
-            for r in 0..20 {
-                state[0] = state[0].cube();
-                if r < 19 { state[0] += c.scalar_rc[r]; }
-                let old_s0 = state[0];
-                let mut new_s0 = F::ZERO;
-                for j in 0..WIDTH { new_s0 += state[j] * c.first_rows[r][j]; }
-                state[0] = new_s0;
-                for j in 1..WIDTH { state[j] += old_s0 * c.v_vecs[r][j - 1]; }
-                unsafe { *partial_cps.get_unchecked(r).as_ptr().add(i).cast_mut() = state; }
-            }
-        });
-        cp_idx += 20;
-    }
-    for r in 0..4 {
-        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
-        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
-            *d = *s;
-            for k in 0..WIDTH { d[k] += c.final_rc[r][k]; d[k] = d[k].cube(); }
-            mds_circ_16(d);
-        });
-        cp_idx += 1;
-    }
+    // Compute all 30 checkpoints in a single parallel pass per row
+    // Each row independently applies all 29 transitions and stores results
+    let cp0 = &mut checkpoints[0];
+    for i in 0..n_rows { cp0[i] = std::array::from_fn(|k| input_cols[k][i]); }
+    (0..n_rows).into_par_iter().for_each(|i| {
+        let mut state = checkpoints[0][i];
+        // 4 initial full rounds
+        for r in 0..4 {
+            for k in 0..WIDTH { state[k] += c.initial_rc[r][k]; state[k] = state[k].cube(); }
+            mds_circ_16(&mut state);
+            unsafe { *checkpoints.get_unchecked(1 + r).as_ptr().add(i).cast_mut() = state; }
+        }
+        // Linear transition
+        for (s, &rc) in state.iter_mut().zip(c.frc.iter()) { *s += rc; }
+        let inp = state;
+        for k in 0..WIDTH { state[k] = F::ZERO; for j in 0..WIDTH { state[k] += inp[j] * c.m_i[k][j]; } }
+        unsafe { *checkpoints.get_unchecked(5).as_ptr().add(i).cast_mut() = state; }
+        // 20 partial rounds
+        for r in 0..20 {
+            state[0] = state[0].cube();
+            if r < 19 { state[0] += c.scalar_rc[r]; }
+            let old_s0 = state[0];
+            let mut new_s0 = F::ZERO;
+            for j in 0..WIDTH { new_s0 += state[j] * c.first_rows[r][j]; }
+            state[0] = new_s0;
+            for j in 1..WIDTH { state[j] += old_s0 * c.v_vecs[r][j - 1]; }
+            unsafe { *checkpoints.get_unchecked(6 + r).as_ptr().add(i).cast_mut() = state; }
+        }
+        // 4 final full rounds
+        for r in 0..4 {
+            for k in 0..WIDTH { state[k] += c.final_rc[r][k]; state[k] = state[k].cube(); }
+            mds_circ_16(&mut state);
+            unsafe { *checkpoints.get_unchecked(26 + r).as_ptr().add(i).cast_mut() = state; }
+        }
+    });
     checkpoints
 }
 
