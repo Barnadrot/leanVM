@@ -2,7 +2,7 @@ use tracing::instrument;
 
 use crate::{
     F,
-    tables::{Poseidon1Cols16, WIDTH},
+    tables::{Poseidon1Cols16, WIDTH, poseidon::PARTIAL_ROUNDS},
 };
 use backend::*;
 
@@ -66,7 +66,7 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
     let first_rows = poseidon1_sparse_first_row();
     let v_vecs = poseidon1_sparse_v();
     let scalar_rc = poseidon1_sparse_scalar_round_constants();
-    let n_partial = perm.partial_rounds.len();
+    let n_partial = PARTIAL_ROUNDS;
     for round in 0..n_partial {
         state[0] = state[0].cube();
         if round < n_partial - 1 { state[0] += scalar_rc[round]; }
@@ -77,17 +77,16 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
     }
 
     // Ending full rounds — only write LAST pair (used by AIR compression check)
+    // Ending full rounds (4 rounds = 2 pairs)
     let final_consts = poseidon1_final_constants();
-    let n_ending_pairs = perm.ending_full_rounds.len();
-    for (pair_idx, constants) in final_consts.chunks_exact(2).enumerate() {
+    for constants in final_consts.chunks_exact(2) {
         for (s, &c) in state.iter_mut().zip(constants[0].iter()) { *s += c; *s = s.cube(); }
         mds_circ_16(&mut state);
         for (s, &c) in state.iter_mut().zip(constants[1].iter()) { *s += c; *s = s.cube(); }
         mds_circ_16(&mut state);
-        if pair_idx == n_ending_pairs - 1 {
-            for k in 0..WIDTH { *perm.ending_full_rounds[pair_idx][k] = state[k]; }
-        }
     }
+    // Write final state (GKR-verified)
+    for k in 0..WIDTH { *perm.final_state[k] = state[k]; }
 
     // Output compression from the GKR-verified final state (same logic as generate_last_2_full_rounds)
     let flag_permute = *perm.flag_permute;

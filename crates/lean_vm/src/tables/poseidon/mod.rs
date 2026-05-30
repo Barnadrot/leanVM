@@ -90,7 +90,7 @@ pub use trace_gen::fill_trace_poseidon_16;
 
 pub(super) const WIDTH: usize = 16;
 const HALF_INITIAL_FULL_ROUNDS: usize = POSEIDON1_HALF_FULL_ROUNDS / 2;
-const PARTIAL_ROUNDS: usize = POSEIDON1_PARTIAL_ROUNDS;
+pub(super) const PARTIAL_ROUNDS: usize = POSEIDON1_PARTIAL_ROUNDS;
 const HALF_FINAL_FULL_ROUNDS: usize = POSEIDON1_HALF_FULL_ROUNDS / 2;
 
 // domainsep encoding: see `tables/mod.rs`.
@@ -309,8 +309,9 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         ]
     }
     fn computation_bound_columns(&self) -> Vec<std::ops::Range<usize>> {
-        let intermediates_start = POSEIDON_COL_OUT_HI + WIDTH / 2;
-        vec![intermediates_start..num_cols_poseidon_16()]
+        // final_state: GKR-verified output of the last Poseidon round
+        let final_state_start = POSEIDON_COL_OUT_HI + WIDTH / 2;
+        vec![final_state_start..final_state_start + WIDTH]
     }
     fn degree_air(&self) -> usize {
         // All intermediate constraints verified by Poseidon GKR.
@@ -388,20 +389,19 @@ pub(super) struct Poseidon1Cols16<T> {
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    // virtual columns (9..33, memory-bound via Shout)
+    // committed columns (9..25, inputs stacked in PCS)
     pub inputs: [T; WIDTH],
+    // virtual columns (25..41, memory-bound outputs)
     pub out_lo: [T; WIDTH / 2],
     pub out_hi: [T; WIDTH / 2],
-    // virtual columns (33..101, verified by Poseidon GKR)
-    pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
-    pub partial_rounds: [T; PARTIAL_ROUNDS],
-    pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS],
+    // virtual column (41..57, GKR-verified final Poseidon state)
+    pub final_state: [T; WIDTH],
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {
     // All intermediate transition constraints verified by the Poseidon GKR.
     // Only output compression remains (low degree).
-    let final_state = &local.ending_full_rounds[HALF_FINAL_FULL_ROUNDS - 1];
+    let final_state = &local.final_state;
     let not_permute = AB::IF::ONE - local.flag_permute;
     let compression_last4 = not_permute - local.flag_short;
 
