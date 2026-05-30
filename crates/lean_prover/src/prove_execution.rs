@@ -107,7 +107,21 @@ pub fn prove_execution(
         }
     });
 
-    // 1st Commitment
+    // Start checkpoint computation in background (independent of FS state)
+    let poseidon_table = Table::poseidon16();
+    let checkpoint_handle = if poseidon_checkpoints.is_none() {
+        let pos_trace = &traces[&poseidon_table];
+        let pos_n_rows = 1usize << pos_trace.log_n_rows;
+        let input_data: Vec<Vec<F>> = (0..16)
+            .map(|k| pos_trace.columns[POSEIDON_COL_INPUT_START + k].clone())
+            .collect();
+        Some(std::thread::spawn(move || {
+            let input_refs: Vec<&[F]> = input_data.iter().map(|v| v.as_slice()).collect();
+            sub_protocols::poseidon_gkr::compute_checkpoints_from_inputs(&input_refs, pos_n_rows)
+        }))
+    } else { None };
+
+    // 1st Commitment (runs in parallel with checkpoint computation)
     let t_commit = std::time::Instant::now();
     let stacked_pcs_witness = stack_polynomials_and_commit(
         &mut prover_state,
@@ -477,13 +491,16 @@ pub fn prove_execution(
             let _col_evals = &table_col_evals[&poseidon_table];
 
             let t_gkr = std::time::Instant::now();
+            // Collect background checkpoints if computed
+            let checkpoints = poseidon_checkpoints
+                .or_else(|| checkpoint_handle.map(|h| h.join().unwrap()));
             let (gkr_final_point, gkr_final_input_evals) =
                 sub_protocols::poseidon_gkr::prove_poseidon_gkr_precomputed(
                     &mut prover_state,
                     &input_cols,
                     pos_n_rows,
                     pos_log_n,
-                    poseidon_checkpoints,
+                    checkpoints,
                 );
             eprintln!("    GKR prove: {:.0}ms", t_gkr.elapsed().as_secs_f64() * 1000.0);
 

@@ -174,22 +174,11 @@ pub fn get_execution_trace(
         );
     }
 
-    // Pre-compute Poseidon GKR checkpoints from the trace's input columns
-    let poseidon_checkpoints = {
-        let pos_table = Table::poseidon16();
-        let pos_trace = &traces[&pos_table];
-        let n_rows = 1 << pos_trace.log_n_rows;
-        let input_cols: Vec<&[F]> = (0..16)
-            .map(|k| pos_trace.columns[POSEIDON_COL_INPUT_START + k].as_slice())
-            .collect();
-        Some(sub_protocols::poseidon_gkr::compute_checkpoints_from_inputs(&input_cols, n_rows))
-    };
-
     ExecutionTrace {
         traces,
         memory: memory_padded,
         metadata: execution_result.metadata,
-        poseidon_checkpoints,
+        poseidon_checkpoints: None, // computed lazily during proving
     }
 }
 
