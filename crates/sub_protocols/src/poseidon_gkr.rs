@@ -259,7 +259,31 @@ fn packed_row_pairs_base(prev: &[[F; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], s
     result
 }
 
-fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], start: usize, _half: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
+/// Precomputed constants for a specific transition type, avoiding per-pack recomputation
+struct TransitionPrecomp {
+    eq_el: [PEF; WIDTH],
+    // For partial rounds: cw and weight vector
+    cw: PEF,
+    weights: [PEF; WIDTH], // w_k = eq_el[k] + eq_el[0] * first_rows[r][k]
+}
+
+impl TransitionPrecomp {
+    fn new(eq_p_el: &[EF], t: usize, c: &PoseidonConstants) -> Self {
+        let eq_el: [PEF; WIDTH] = std::array::from_fn(|k| PEF::from(eq_p_el[k]));
+        let (cw, weights) = if (5..=24).contains(&t) {
+            let r = t - 5;
+            let mut cw = eq_el[0] * c.first_rows[r][0];
+            for k in 1..WIDTH { cw += eq_el[k] * c.v_vecs[r][k - 1]; }
+            let weights: [PEF; WIDTH] = std::array::from_fn(|k| if k == 0 { PEF::default() } else { eq_el[k] + eq_el[0] * c.first_rows[r][k] });
+            (cw, weights)
+        } else {
+            (PEF::default(), [PEF::default(); WIDTH])
+        };
+        Self { eq_el, cw, weights }
+    }
+}
+
+fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], pre: &TransitionPrecomp, start: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
     let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i)]));
     let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i) + 1]));
     let diff_eq_p = eq_hi_p - eq_lo_p;
@@ -268,14 +292,13 @@ fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &
         a_p[k] = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| folded_prev[2 * (start + i)][k]));
         d_p[k] = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| folded_prev[2 * (start + i) + 1][k])) - a_p[k];
     }
-    let eq_el: [PEF; WIDTH] = std::array::from_fn(|k| PEF::from(eq_p_el[k]));
+    let eq_el = &pre.eq_el;
     let mut result = [PEF::default(); 5];
     if (5..=24).contains(&t) {
         let r = t - 5;
-        let mut cw = eq_el[0] * c.first_rows[r][0];
-        for k in 1..WIDTH { cw += eq_el[k] * c.v_vecs[r][k - 1]; }
+        let cw = pre.cw;
         let mut lc = PEF::default(); let mut ls = PEF::default();
-        for k in 1..WIDTH { let w = eq_el[k] + eq_el[0] * c.first_rows[r][k]; lc += w * a_p[k]; ls += w * d_p[k]; }
+        for k in 1..WIDTH { lc += pre.weights[k] * a_p[k]; ls += pre.weights[k] * d_p[k]; }
         for idx in 0..n_evals {
             let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
@@ -389,6 +412,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             std::array::from_fn(|k| EF::from(pair[0][k]) * one_minus_r + EF::from(pair[1][k]) * r_v)
         }).collect();
 
+        let pre = TransitionPrecomp::new(&eq_p_el, t, &c);
         for v in 1..log_n_rows {
             let half = n >> (v + 1);
             let n_evals = degree;
@@ -397,7 +421,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let mut raw_evals: Vec<EF> = if n_packed >= RAYON_CHUNK / PACK_WIDTH {
                 let packed_sums = (0..n_packed).into_par_iter()
                     .fold(|| [PEF::default(); 5], |mut acc, p| {
-                        let contrib = packed_row_pairs_pef(&folded_prev, &eq_table, &eq_p_el, p * PACK_WIDTH, half, t, n_evals, &c);
+                        let contrib = packed_row_pairs_pef(&folded_prev, &eq_table, &pre, p * PACK_WIDTH, t, n_evals, &c);
                         for point in 0..n_evals { acc[point] += contrib[point]; } acc
                     })
                     .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
