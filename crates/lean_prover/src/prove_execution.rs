@@ -287,7 +287,6 @@ pub fn prove_execution(
             prover_state.duplex();
             let alpha_bind: EF = prover_state.sample();
 
-            // Compute pushforward P_batched[j] and expected_batched_val from col_evals
             let mut p_batched = EF::zero_vec(memory_size);
             let mut expected_batched_val = EF::ZERO;
             let mut gamma_power = EF::ONE;

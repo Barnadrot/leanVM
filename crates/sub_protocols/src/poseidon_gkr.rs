@@ -54,50 +54,6 @@ fn hsum_pef(p: PEF) -> EF {
     sum
 }
 
-struct PoseidonExtraData { eq_p_el: Vec<EF>, c: PoseidonConstants }
-unsafe impl Send for PoseidonExtraData {}
-unsafe impl Sync for PoseidonExtraData {}
-
-#[inline(always)]
-fn eval_packed_transition(t: usize, state_in: &[PEF; WIDTH], extra: &PoseidonExtraData) -> PEF {
-    let c = &extra.c;
-    let eq_el: [PEF; WIDTH] = std::array::from_fn(|k| PEF::from(extra.eq_p_el[k]));
-    match t {
-        0..=3 => {
-            let rc = &c.initial_rc[t];
-            let mut state = *state_in;
-            for k in 0..WIDTH { state[k] += rc[k]; state[k] = state[k] * state[k] * state[k]; }
-            mds_circ_16(&mut state);
-            eq_el.iter().zip(state.iter()).map(|(&e, &s)| e * s).fold(PEF::default(), |a, b| a + b)
-        }
-        4 => {
-            let mut state = *state_in;
-            for (s, &rc) in state.iter_mut().zip(c.frc.iter()) { *s += rc; }
-            let inp = state;
-            for k in 0..WIDTH { state[k] = PEF::default(); for j in 0..WIDTH { state[k] += inp[j] * c.m_i[k][j]; } }
-            eq_el.iter().zip(state.iter()).map(|(&e, &s)| e * s).fold(PEF::default(), |a, b| a + b)
-        }
-        5..=24 => {
-            let r = t - 5;
-            let mut cw = eq_el[0] * c.first_rows[r][0];
-            for k in 1..WIDTH { cw += eq_el[k] * c.v_vecs[r][k - 1]; }
-            let mut lin = PEF::default();
-            for k in 1..WIDTH { lin += (eq_el[k] + eq_el[0] * c.first_rows[r][k]) * state_in[k]; }
-            let mut cubed = state_in[0] * state_in[0] * state_in[0];
-            if r < 19 { cubed += c.scalar_rc[r]; }
-            lin + cw * cubed
-        }
-        25..=28 => {
-            let rc = &c.final_rc[t - 25];
-            let mut state = *state_in;
-            for k in 0..WIDTH { state[k] += rc[k]; state[k] = state[k] * state[k] * state[k]; }
-            mds_circ_16(&mut state);
-            eq_el.iter().zip(state.iter()).map(|(&e, &s)| e * s).fold(PEF::default(), |a, b| a + b)
-        }
-        _ => unreachable!(),
-    }
-}
-
 fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec<[F; WIDTH]>> {
     let c = poseidon_constants();
     // Pre-allocate all checkpoints at once to avoid per-step allocation
@@ -392,7 +348,6 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
         let n = 1usize << log_n_rows;
         if t < N_TRANSITIONS - 1 { prover_state.add_extension_scalar(current_claim); }
 
-        let extra = PoseidonExtraData { eq_p_el: eq_p_el.clone(), c: poseidon_constants() };
         let mut eq_table = eval_eq(&p_row);
         let mut challenges = Vec::with_capacity(log_n_rows);
         let pre = TransitionPrecomp::new(&eq_p_el, t, &c);
