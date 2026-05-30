@@ -100,40 +100,57 @@ fn eval_packed_transition(t: usize, state_in: &[PEF; WIDTH], extra: &PoseidonExt
 
 fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec<[F; WIDTH]>> {
     let c = poseidon_constants();
-    let mut checkpoints: Vec<Vec<[F; WIDTH]>> = Vec::with_capacity(N_TRANSITIONS + 1);
-    let mut current: Vec<[F; WIDTH]> = (0..n_rows).map(|i| std::array::from_fn(|k| input_cols[k][i])).collect();
-    checkpoints.push(current.clone());
+    // Pre-allocate all checkpoints at once to avoid per-step allocation
+    let mut checkpoints: Vec<Vec<[F; WIDTH]>> = (0..N_TRANSITIONS + 1)
+        .map(|_| unsafe { let mut v = Vec::with_capacity(n_rows); v.set_len(n_rows); v })
+        .collect();
+    // Initialize checkpoint 0 from input columns
+    for i in 0..n_rows { checkpoints[0][i] = std::array::from_fn(|k| input_cols[k][i]); }
+    let mut cp_idx = 0;
     for r in 0..4 {
-        current.par_iter_mut().for_each(|row| {
-            for k in 0..WIDTH { row[k] += c.initial_rc[r][k]; row[k] = row[k].cube(); }
-            mds_circ_16(row);
+        let (src, dst) = if cp_idx + 1 < checkpoints.len() {
+            let (left, right) = checkpoints.split_at_mut(cp_idx + 1);
+            (&left[cp_idx], &mut right[0])
+        } else { unreachable!() };
+        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
+            *d = *s;
+            for k in 0..WIDTH { d[k] += c.initial_rc[r][k]; d[k] = d[k].cube(); }
+            mds_circ_16(d);
         });
-        checkpoints.push(current.clone());
+        cp_idx += 1;
     }
-    current.par_iter_mut().for_each(|row| {
-        for (s, &rc) in row.iter_mut().zip(c.frc.iter()) { *s += rc; }
-        let inp = *row;
-        for k in 0..WIDTH { row[k] = F::ZERO; for j in 0..WIDTH { row[k] += inp[j] * c.m_i[k][j]; } }
-    });
-    checkpoints.push(current.clone());
+    {
+        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
+        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
+            *d = *s;
+            for (ds, &rc) in d.iter_mut().zip(c.frc.iter()) { *ds += rc; }
+            let inp = *d;
+            for k in 0..WIDTH { d[k] = F::ZERO; for j in 0..WIDTH { d[k] += inp[j] * c.m_i[k][j]; } }
+        });
+        cp_idx += 1;
+    }
     for r in 0..20 {
-        current.par_iter_mut().for_each(|row| {
-            row[0] = row[0].cube();
-            if r < 19 { row[0] += c.scalar_rc[r]; }
-            let old_s0 = row[0];
+        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
+        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
+            *d = *s;
+            d[0] = d[0].cube();
+            if r < 19 { d[0] += c.scalar_rc[r]; }
+            let old_s0 = d[0];
             let mut new_s0 = F::ZERO;
-            for j in 0..WIDTH { new_s0 += row[j] * c.first_rows[r][j]; }
-            row[0] = new_s0;
-            for j in 1..WIDTH { row[j] += old_s0 * c.v_vecs[r][j - 1]; }
+            for j in 0..WIDTH { new_s0 += d[j] * c.first_rows[r][j]; }
+            d[0] = new_s0;
+            for j in 1..WIDTH { d[j] += old_s0 * c.v_vecs[r][j - 1]; }
         });
-        checkpoints.push(current.clone());
+        cp_idx += 1;
     }
     for r in 0..4 {
-        current.par_iter_mut().for_each(|row| {
-            for k in 0..WIDTH { row[k] += c.final_rc[r][k]; row[k] = row[k].cube(); }
-            mds_circ_16(row);
+        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
+        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
+            *d = *s;
+            for k in 0..WIDTH { d[k] += c.final_rc[r][k]; d[k] = d[k].cube(); }
+            mds_circ_16(d);
         });
-        checkpoints.push(current.clone());
+        cp_idx += 1;
     }
     checkpoints
 }
@@ -400,7 +417,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
         let mut eq_table = eval_eq(&p_row);
         let mut challenges = Vec::with_capacity(log_n_rows);
 
-        // First round (v=0): evaluate in base field, avoid F→EF conversion
+        // First round (v=0): evaluate in base field
         {
             let half = n >> 1;
             let n_evals = degree;
@@ -429,12 +446,11 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
         }
 
-        // Fold from F to EF: a + (b-a)*r₀ — only 1 F×EF mul per element (not 2 EF muls)
+        // Fold from F to EF
         let r0 = challenges[0];
         let mut folded_prev: Vec<[EF; WIDTH]> = prev.par_chunks_exact(2).map(|pair| {
             std::array::from_fn(|k| EF::from(pair[0][k]) + EF::from(pair[1][k] - pair[0][k]) * r0)
         }).collect();
-
         let pre = TransitionPrecomp::new(&eq_p_el, t, &c);
         for v in 1..log_n_rows {
             let half = n >> (v + 1);
@@ -478,7 +494,6 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let r_v: EF = prover_state.sample();
             challenges.push(r_v);
             let one_minus_r = EF::ONE - r_v;
-            // In-place fold: safe because h < 2h, so writes don't overwrite unread data
             if half >= RAYON_CHUNK {
                 // Fused fold: eq and prev folded in a single parallel pass
                 let mut new_eq: Vec<EF> = Vec::with_capacity(half);
