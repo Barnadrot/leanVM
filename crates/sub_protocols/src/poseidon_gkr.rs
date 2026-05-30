@@ -85,19 +85,25 @@ fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec
         });
         cp_idx += 1;
     }
-    for r in 0..20 {
-        let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
-        dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| {
-            *d = *s;
-            d[0] = d[0].cube();
-            if r < 19 { d[0] += c.scalar_rc[r]; }
-            let old_s0 = d[0];
-            let mut new_s0 = F::ZERO;
-            for j in 0..WIDTH { new_s0 += d[j] * c.first_rows[r][j]; }
-            d[0] = new_s0;
-            for j in 1..WIDTH { d[j] += old_s0 * c.v_vecs[r][j - 1]; }
+    // Compute all 20 partial rounds in a single parallel pass per row
+    {
+        let partial_start = cp_idx;
+        let (prefix, partial_cps) = checkpoints.split_at_mut(partial_start + 1);
+        let src = &prefix[partial_start];
+        (0..n_rows).into_par_iter().for_each(|i| {
+            let mut state = src[i];
+            for r in 0..20 {
+                state[0] = state[0].cube();
+                if r < 19 { state[0] += c.scalar_rc[r]; }
+                let old_s0 = state[0];
+                let mut new_s0 = F::ZERO;
+                for j in 0..WIDTH { new_s0 += state[j] * c.first_rows[r][j]; }
+                state[0] = new_s0;
+                for j in 1..WIDTH { state[j] += old_s0 * c.v_vecs[r][j - 1]; }
+                unsafe { *partial_cps.get_unchecked(r).as_ptr().add(i).cast_mut() = state; }
+            }
         });
-        cp_idx += 1;
+        cp_idx += 20;
     }
     for r in 0..4 {
         let (src, dst) = { let (left, right) = checkpoints.split_at_mut(cp_idx + 1); (&left[cp_idx], &mut right[0]) };
@@ -398,6 +404,8 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
         //               state_D = D_lo + (D_hi - D_lo)*pt
         //               state = state_A + state_D * r0
         let r0 = challenges[0];
+        let r0_sq = r0 * r0;
+        let r0_cu = r0_sq * r0;
         let start_v;
         let mut folded_prev: Vec<[EF; WIDTH]>;
         if n >= 4 * RAYON_CHUNK && log_n_rows > 1 {
@@ -442,14 +450,14 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
                                 let cube_d = d0 * d0 * d0;
                                 let three_a2d = a0 * a0 * d0 * F::from_usize(3);
                                 let three_ad2 = a0 * d0 * d0 * F::from_usize(3);
-                                let r0_sq = r0 * r0; let r0_cu = r0_sq * r0;
+                                // r0_sq, r0_cu hoisted above
                                 let mut cubed = PEF::from(cube_a) + PEF::from(three_a2d) * r0
                                     + PEF::from(three_ad2) * r0_sq + PEF::from(cube_d) * r0_cu;
                                 if r < 19 { cubed += c.scalar_rc[r]; }
                                 lin + pre.cw * cubed
                             } else if t <= 3 || t >= 25 {
                                 // Full round: cube(A_k+rc + D_k*r0) for each k
-                                let r0_sq = r0 * r0; let r0_cu = r0_sq * r0;
+                                // r0_sq, r0_cu hoisted above
                                 let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t-25], _ => unreachable!() };
                                 let mut w = PEF::default();
                                 for k in 0..WIDTH {
