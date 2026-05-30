@@ -124,11 +124,15 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
         let h_table = precompute_h_table(&checkpoints, t, &eq_p_el, n_rows);
         let eq_table = eval_eq(&p_row);
 
+        // Verify claim
+        let actual_sum: EF = h_table.iter().zip(eq_table.iter()).map(|(&h, &e)| h * e).sum();
+        debug_assert_eq!(actual_sum, current_claim, "claim mismatch at t={t}");
+
         // Product sumcheck: Σ_x eq_table(x) * h_table(x) = current_claim
         let h_packed: Vec<EFPacking<EF>> = pack_extension(&h_table);
         let eq_packed: Vec<EFPacking<EF>> = pack_extension(&eq_table);
 
-        let (point, _sum, folded_h, folded_eq) = run_product_sumcheck(
+        let (point, _sum, _folded_h, _folded_eq) = run_product_sumcheck(
             &MleRef::ExtensionPacked(&h_packed),
             &MleRef::ExtensionPacked(&eq_packed),
             prover_state,
@@ -137,9 +141,11 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             0,
         );
 
-        // After product sumcheck: h(r) and eq(r) are revealed
-        // h(r) = <eq_p_el, T_t(cp_t(r))>
-        // We need to reveal cp_t(r) so the verifier can check h(r)
+        // Verify endpoint: h(r) * eq(r) should equal _sum from product sumcheck
+        let eq_at_r = MultilinearPoint(p_row.clone()).eq_poly_outside(&point);
+        let h_at_r: EF = h_table.evaluate(&point);
+        debug_assert_eq!(_sum, h_at_r * eq_at_r, "product sumcheck endpoint mismatch");
+
         let cp_t_at_r: Vec<EF> = {
             let eq_r = eval_eq(&point.0);
             (0..WIDTH).map(|k| (0..n_rows).into_par_iter().map(|i| eq_r[i] * checkpoints[t][i][k]).sum()).collect()
@@ -187,14 +193,18 @@ pub fn verify_poseidon_gkr(verifier_state: &mut impl FSVerifier<EF>, log_n_rows:
         let cp_t_at_r = verifier_state.next_extension_scalars_vec(WIDTH)?;
 
         // Endpoint check WITHOUT division:
-        // final_sum = h(r) * eq(p_row, r)
-        // h(r) = <eq_p_el, T_t(cp_t(r))>
-        // So: final_sum = eq(p_row, r) * <eq_p_el, T_t(cp_t(r))>
         let eq_at = MultilinearPoint(p_row.clone()).eq_poly_outside(&MultilinearPoint(challenges.clone()));
         let trans_out = apply_transition_to_evals(t, &cp_t_at_r, &c);
         let mut expected_h = EF::ZERO;
         for k in 0..WIDTH { expected_h += eq_p_el[k] * trans_out[k]; }
-        if final_sum != eq_at * expected_h { return Err(ProofError::InvalidProof); }
+        if final_sum != eq_at * expected_h {
+            eprintln!("  VERIFY FAIL t={t}: final_sum={final_sum:?}");
+            eprintln!("    eq_at={eq_at:?}");
+            eprintln!("    expected_h={expected_h:?}");
+            eprintln!("    eq_at*h={:?}", eq_at * expected_h);
+            eprintln!("    p_row len={} challenges len={}", p_row.len(), challenges.len());
+            return Err(ProofError::InvalidProof);
+        }
 
         verifier_state.duplex();
         let alpha: Vec<EF> = verifier_state.sample_vec(4);
