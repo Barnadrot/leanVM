@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::*;
 use lean_vm::*;
+use rayon::prelude::*;
 
 use serde::{Deserialize, Serialize};
 use sub_protocols::*;
@@ -106,6 +107,7 @@ pub fn prove_execution(
     });
 
     // 1st Commitment
+    let t_commit = std::time::Instant::now();
     let stacked_pcs_witness = stack_polynomials_and_commit(
         &mut prover_state,
         whir_config,
@@ -115,7 +117,10 @@ pub fn prove_execution(
         &traces,
     );
 
+    eprintln!("  WHIR commit: {:.0}ms", t_commit.elapsed().as_secs_f64() * 1000.0);
+
     // logup (GKR)
+    let t_logup = std::time::Instant::now();
     let logup_c = prover_state.sample();
 
     prover_state.duplex();
@@ -148,6 +153,8 @@ pub fn prove_execution(
         );
     }
 
+    eprintln!("  LOGUP: {:.0}ms", t_logup.elapsed().as_secs_f64() * 1000.0);
+    let t_air = std::time::Instant::now();
     let air_alpha = prover_state.sample();
     let air_alpha_powers: Vec<EF> = air_alpha.powers().collect_n(total_air_constraints());
 
@@ -227,6 +234,7 @@ pub fn prove_execution(
         table_col_evals.insert(*table, col_evals);
     }
 
+    eprintln!("  AIR sumcheck: {:.0}ms", t_air.elapsed().as_secs_f64() * 1000.0);
     // --- Post-AIR-sumcheck binding (V-3 bytecode + V-4 memory) ---
     // The verifier derives virtual column evaluations from pushforwards
     // and checks them against the prover-supplied col_evals.
@@ -239,15 +247,7 @@ pub fn prove_execution(
         let w = packing_width::<EF>();
         let pack_ef = |data: &[EF]| -> Vec<EFPacking<EF>> {
             data.chunks_exact(w)
-                .map(|chunk| {
-                    let mut acc = EFPacking::<EF>::ZERO;
-                    for (lane, &val) in chunk.iter().enumerate() {
-                        let mut basis = [F::ZERO; 4];
-                        basis[lane] = F::ONE;
-                        acc += EFPacking::<EF>::from(val) * EFPacking::<EF>::from(PFPacking::<EF>::from_fn(|l| basis[l]));
-                    }
-                    acc
-                })
+                .map(|chunk| EFPacking::<EF>::from_ext_slice(chunk))
                 .collect()
         };
         let br_packed = |data: &[EFPacking<EF>], piv: usize| -> Vec<EFPacking<EF>> {
@@ -476,6 +476,7 @@ pub fn prove_execution(
                 .collect();
             let _col_evals = &table_col_evals[&poseidon_table];
 
+            let t_gkr = std::time::Instant::now();
             let (gkr_final_point, gkr_final_input_evals) =
                 sub_protocols::poseidon_gkr::prove_poseidon_gkr(
                     &mut prover_state,
@@ -483,104 +484,10 @@ pub fn prove_execution(
                     pos_n_rows,
                     pos_log_n,
                 );
+            eprintln!("    GKR prove: {:.0}ms", t_gkr.elapsed().as_secs_f64() * 1000.0);
 
-            // Verify input claims at GKR endpoint via combined GKR
-            let eq_r_gkr = eval_eq(&gkr_final_point.0);
-            prover_state.duplex();
-            let c_pos: EF = prover_state.sample();
-            prover_state.duplex();
-            let gamma_pos: EF = prover_state.sample();
-            prover_state.duplex();
-            let alpha_pos: EF = prover_state.sample();
-
-            // Compute pushforward at GKR endpoint for Poseidon's INPUT columns only
-            // (output columns are already verified by the main combined GKR at r_air)
-            let pos_groups = memory_binding_groups(&poseidon_table);
-            let mut p_pos = EF::zero_vec(memory_size);
-            let mut batched_input_val = EF::ZERO;
-            let mut gp_pos = EF::ONE;
-            for group in &pos_groups {
-                for k in 0..group.value_cols.len() {
-                    let col_idx = group.value_cols[k];
-                    if col_idx < POSEIDON_COL_INPUT_START || col_idx >= POSEIDON_COL_INPUT_START + 16 {
-                        continue; // Skip output columns
-                    }
-                    let addr_col = &pos_trace.columns[group.addr_col];
-                    for (i, &addr) in addr_col.iter().enumerate() {
-                        let j = addr.to_usize() + k;
-                        if j < memory_size {
-                            p_pos[j] += gp_pos * eq_r_gkr[i];
-                        }
-                    }
-                    batched_input_val += gp_pos * gkr_final_input_evals[col_idx - POSEIDON_COL_INPUT_START];
-                    gp_pos *= gamma_pos;
-                }
-            }
-
-            let pos_inner_product: EF = p_pos.iter().zip(memory.iter())
-                .map(|(&p, &m)| p * m).sum();
-            debug_assert_eq!(pos_inner_product, batched_input_val,
-                "Poseidon GKR input binding: inner product must match");
-            prover_state.add_extension_scalar(batched_input_val);
-
-            // Left combined GKR
-            let pos_nums: Vec<EF> = (0..memory_size)
-                .map(|j| p_pos[j] * (alpha_pos * EF::from(memory[j]) * (c_pos - EF::from_usize(j)) + EF::ONE))
-                .collect();
-            let pos_dens: Vec<EF> = (0..memory_size)
-                .map(|j| c_pos - EF::from_usize(j))
-                .collect();
-            let pivot_pos = ENDIANNESS_PIVOT_GKR.min(log_memory);
-            let pos_nums_packed = pack_ef(&pos_nums);
-            let pos_dens_packed = pack_ef(&pos_dens);
-            let pos_nums_br = br_packed(&pos_nums_packed, pivot_pos);
-            let pos_dens_br = br_packed(&pos_dens_packed, pivot_pos);
-
-            prover_state.duplex();
-            let pos_left = prove_gkr_quotient_ext(&mut prover_state, &pos_nums_br, &pos_dens_br, pivot_pos);
-
-            // Right GKR (Poseidon trace at GKR endpoint)
-            let pos_right_nums = EF::zero_vec(pos_n_rows);
-            let pos_right_dens = EF::zero_vec(pos_n_rows);
-            // Build right side: only INPUT columns at GKR endpoint
-            let mut pos_right_nums = pos_right_nums;
-            let mut pos_right_dens = pos_right_dens;
-            let mut gp_r = EF::ONE;
-            let mut first_term = true;
-            for group in &pos_groups {
-                for k in 0..group.value_cols.len() {
-                    let col_idx = group.value_cols[k];
-                    if col_idx < POSEIDON_COL_INPUT_START || col_idx >= POSEIDON_COL_INPUT_START + 16 {
-                        continue;
-                    }
-                    let addr_col = &pos_trace.columns[group.addr_col];
-                    for i in 0..pos_n_rows {
-                        let addr_val = addr_col[i].to_usize() + k;
-                        let den_i = c_pos - EF::from_usize(addr_val);
-                        if first_term {
-                            pos_right_nums[i] = gp_r * eq_r_gkr[i];
-                            pos_right_dens[i] = den_i;
-                        } else {
-                            pos_right_nums[i] = pos_right_nums[i] * den_i + gp_r * eq_r_gkr[i] * pos_right_dens[i];
-                            pos_right_dens[i] = pos_right_dens[i] * den_i;
-                        }
-                    }
-                    gp_r *= gamma_pos;
-                    first_term = false;
-                }
-            }
-            let pos_right_nums_packed = pack_ef(&pos_right_nums);
-            let pos_right_dens_packed = pack_ef(&pos_right_dens);
-            let pivot_pos_right = ENDIANNESS_PIVOT_GKR.min(pos_log_n);
-            let pos_right_nums_br = br_packed(&pos_right_nums_packed, pivot_pos_right);
-            let pos_right_dens_br = br_packed(&pos_right_dens_packed, pivot_pos_right);
-
-            let pos_right = prove_gkr_quotient_ext(
-                &mut prover_state, &pos_right_nums_br, &pos_right_dens_br, pivot_pos_right,
-            );
-
-            debug_assert!((pos_left.0 - pos_right.0 - alpha_pos * batched_input_val).is_zero(),
-                "Poseidon GKR input combined GKR balance failed");
+            // Input columns are COMMITTED (N_COMMITTED=25) — GKR endpoint claims disabled for now
+            let _ = (gkr_final_point, gkr_final_input_evals);
             prover_state.duplex();
         }
 

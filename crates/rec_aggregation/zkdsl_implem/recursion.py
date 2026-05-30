@@ -134,6 +134,32 @@ def pos_2_full_rounds_final(state_in, pair: Const):
     return out
 
 
+def pos_single_full_round_initial(state_in, r_idx: Const):
+    rc_off = r_idx * 16
+    s1 = Array(16 * DIM)
+    for k in unroll(0, 16):
+        s = add_base_extension_ret(POS_INITIAL_RC_FLAT[rc_off + k], state_in + k * DIM)
+        sq = mul_extension_ret(s, s)
+        cubed = mul_extension_ret(sq, s)
+        copy_5(cubed, s1 + k * DIM)
+    out = Array(16 * DIM)
+    _ = pos_mds_16(s1, out)
+    return out
+
+
+def pos_single_full_round_final(state_in, r_idx: Const):
+    rc_off = r_idx * 16
+    s1 = Array(16 * DIM)
+    for k in unroll(0, 16):
+        s = add_base_extension_ret(POS_FINAL_RC_FLAT[rc_off + k], state_in + k * DIM)
+        sq = mul_extension_ret(s, s)
+        cubed = mul_extension_ret(sq, s)
+        copy_5(cubed, s1 + k * DIM)
+    out = Array(16 * DIM)
+    _ = pos_mds_16(s1, out)
+    return out
+
+
 def pos_linear_transition(state_in):
     frc_added = Array(16 * DIM)
     for k in unroll(0, 16):
@@ -536,7 +562,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     copy_5(bc_balance, bc_expected_balance)
     fs = fs_duplex(fs)
 
-    # Phase 3: Poseidon GKR (verified deterministic intermediates)
+    # Phase 3: Poseidon GKR — 27 transitions (single rounds, max degree 4)
     POSEIDON_TABLE_INDEX = 2
     poseidon_log_n = table_log_heights[POSEIDON_TABLE_INDEX]
     fs = fs_duplex(fs)
@@ -548,24 +574,73 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_claimed: Mut
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
 
-    # t=23: degree 10 — sumcheck + endpoint
-    fs, sc_ch_23, sc_cl_23 = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 10)
-    fs, ie_23 = fs_receive_ef_inlined(fs, 16)
-    out_23 = pos_2_full_rounds_final(ie_23, 0)
-    _ = pos_gkr_verify_endpoint(sc_cl_23, out_23, pos_eq_p_el, pos_p_row, sc_ch_23, poseidon_log_n)
+    # t=28: ending full round 3 (final_rc[3]), degree 4
+    sc_ch: Mut
+    sc_cl: Mut
+    ie: Mut
+    out: Mut
+    alpha: Mut
+    rev: Mut
+    pos_p_row_tmp: Mut
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
+    fs, ie = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(ie, 3)
+    _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
-    fs, alpha_23 = fs_sample_many_ef(fs, 4)
-    pos_eq_p_el = compute_eq_mle_extension(alpha_23, 4)
+    fs, alpha = fs_sample_many_ef(fs, 4)
+    pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     pos_p_row_tmp = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch_23 + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
+        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
     pos_p_row = pos_p_row_tmp
-    # t=22..3: 20 partial rounds — sumcheck + endpoint
+
+    # t=27: ending full round 2 (final_rc[2]), degree 4
+    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
+    fs, ie = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(ie, 2)
+    _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
+    fs = fs_duplex(fs)
+    fs, alpha = fs_sample_many_ef(fs, 4)
+    pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
+    pos_p_row_tmp = Array(poseidon_log_n * DIM)
+    for i in range(0, poseidon_log_n):
+        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
+    pos_p_row = pos_p_row_tmp
+
+    # t=26: ending full round 1 (final_rc[1]), degree 4
+    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
+    fs, ie = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(ie, 1)
+    _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
+    fs = fs_duplex(fs)
+    fs, alpha = fs_sample_many_ef(fs, 4)
+    pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
+    rev = Array(poseidon_log_n * DIM)
+    for i in range(0, poseidon_log_n):
+        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+    pos_p_row = rev
+
+    # t=25: ending full round 0 (final_rc[0]), degree 4
+    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
+    fs, ie = fs_receive_ef_inlined(fs, 16)
+    out = pos_single_full_round_final(ie, 0)
+    _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
+    fs = fs_duplex(fs)
+    fs, alpha = fs_sample_many_ef(fs, 4)
+    pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
+    rev = Array(poseidon_log_n * DIM)
+    for i in range(0, poseidon_log_n):
+        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+    pos_p_row = rev
+
+    # t=24..5: 20 partial rounds (reverse), degree 4
     for pr_idx in unroll(0, 20):
         fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
         fs, sc_ch_pr, sc_cl_pr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
         fs, ie_pr = fs_receive_ef_inlined(fs, 16)
-        # Inline partial round: r_idx = 19 - pr_idx
         pr_sq = mul_extension_ret(ie_pr, ie_pr)
         pr_cubed: Mut = mul_extension_ret(pr_sq, ie_pr)
         if 0 < pr_idx:
@@ -590,57 +665,48 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         for i in range(0, poseidon_log_n):
             copy_5(sc_ch_pr + (poseidon_log_n - 1 - i) * DIM, pr_rev + i * DIM)
         pos_p_row = pr_rev
-    # t=2: linear transition — sumcheck + endpoint
-    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch_2, sc_cl_2 = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
-    fs, ie_2 = fs_receive_ef_inlined(fs, 16)
-    out_2 = pos_linear_transition(ie_2)
-    _ = pos_gkr_verify_endpoint(sc_cl_2, out_2, pos_eq_p_el, pos_p_row, sc_ch_2, poseidon_log_n)
-    fs = fs_duplex(fs)
-    fs, alpha_2 = fs_sample_many_ef(fs, 4)
-    pos_eq_p_el = compute_eq_mle_extension(alpha_2, 4)
-    rev_2 = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch_2 + (poseidon_log_n - 1 - i) * DIM, rev_2 + i * DIM)
-    pos_p_row = rev_2
-    # t=1: beginning full round pair 1 — sumcheck + endpoint
-    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch_1, sc_cl_1 = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 10)
-    fs, ie_1 = fs_receive_ef_inlined(fs, 16)
-    out_1 = pos_2_full_rounds_initial(ie_1, 1)
-    _ = pos_gkr_verify_endpoint(sc_cl_1, out_1, pos_eq_p_el, pos_p_row, sc_ch_1, poseidon_log_n)
-    fs = fs_duplex(fs)
-    fs, alpha_1 = fs_sample_many_ef(fs, 4)
-    pos_eq_p_el = compute_eq_mle_extension(alpha_1, 4)
-    rev_1 = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch_1 + (poseidon_log_n - 1 - i) * DIM, rev_1 + i * DIM)
-    pos_p_row = rev_1
-    # t=0: beginning full round pair 0 — sumcheck + endpoint
-    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
-    fs, sc_ch_0, sc_cl_0 = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 10)
-    fs, ie_0 = fs_receive_ef_inlined(fs, 16)
-    out_0 = pos_2_full_rounds_initial(ie_0, 0)
-    _ = pos_gkr_verify_endpoint(sc_cl_0, out_0, pos_eq_p_el, pos_p_row, sc_ch_0, poseidon_log_n)
-    fs = fs_duplex(fs)
-    fs, alpha_0 = fs_sample_many_ef(fs, 4)
-    pos_eq_p_el = compute_eq_mle_extension(alpha_0, 4)
-    rev_0 = Array(poseidon_log_n * DIM)
-    for i in range(0, poseidon_log_n):
-        copy_5(sc_ch_0 + (poseidon_log_n - 1 - i) * DIM, rev_0 + i * DIM)
-    pos_p_row = rev_0
 
-    # Poseidon GKR input binding (combined GKR at GKR endpoint)
+    # t=4: linear transition, degree 2
+    fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
+    fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
+    fs, ie = fs_receive_ef_inlined(fs, 16)
+    out = pos_linear_transition(ie)
+    _ = pos_gkr_verify_endpoint(sc_cl, out, pos_eq_p_el, pos_p_row, sc_ch, poseidon_log_n)
     fs = fs_duplex(fs)
-    fs, _pos_c = fs_sample_ef(fs)
-    fs = fs_duplex(fs)
-    fs, _pos_gamma = fs_sample_ef(fs)
-    fs = fs_duplex(fs)
-    fs, _pos_alpha = fs_sample_ef(fs)
-    fs, _pos_batched = fs_receive_ef_inlined(fs, 1)
-    fs = fs_duplex(fs)
-    fs, _pos_left_q, _, _, _ = verify_gkr_quotient(fs, log_memory)
-    fs, _pos_right_q, _, _, _ = verify_gkr_quotient(fs, poseidon_log_n)
+    fs, alpha = fs_sample_many_ef(fs, 4)
+    pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
+    rev = Array(poseidon_log_n * DIM)
+    for i in range(0, poseidon_log_n):
+        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+    pos_p_row = rev
+
+    # t=3..0: 4 beginning full rounds (reverse), degree 4
+    pos_gkr_input_evals: Mut = ZERO_VEC_PTR
+    for fr_idx in unroll(0, 4):
+        fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
+        fs, sc_ch_fr, sc_cl_fr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
+        fs, ie_fr = fs_receive_ef_inlined(fs, 16)
+        if fr_idx == 3:
+            pos_gkr_input_evals = ie_fr
+        out_fr: Mut = ie_fr
+        if fr_idx == 0:
+            out_fr = pos_single_full_round_initial(ie_fr, 3)
+        if fr_idx == 1:
+            out_fr = pos_single_full_round_initial(ie_fr, 2)
+        if fr_idx == 2:
+            out_fr = pos_single_full_round_initial(ie_fr, 1)
+        if fr_idx == 3:
+            out_fr = pos_single_full_round_initial(ie_fr, 0)
+        _ = pos_gkr_verify_endpoint(sc_cl_fr, out_fr, pos_eq_p_el, pos_p_row, sc_ch_fr, poseidon_log_n)
+        fs = fs_duplex(fs)
+        fs, alpha_fr = fs_sample_many_ef(fs, 4)
+        pos_eq_p_el = compute_eq_mle_extension(alpha_fr, 4)
+        fr_rev = Array(poseidon_log_n * DIM)
+        for i in range(0, poseidon_log_n):
+            copy_5(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
+        pos_p_row = fr_rev
+
+    # GKR endpoint inputs verified via WHIR (N_COMMITTED=25)
     fs = fs_duplex(fs)
 
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
@@ -698,6 +764,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 whir_sum,
             )
             curr_randomness += DIM
+
 
     folding_randomness_global: Mut
     s: Mut

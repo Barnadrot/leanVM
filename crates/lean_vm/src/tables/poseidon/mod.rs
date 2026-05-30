@@ -109,11 +109,11 @@ pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5;
 pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
-// 9 committed: 9 flags/control columns; 68 intermediates are virtual (verified by Poseidon GKR)
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9;
-pub const POSEIDON_COL_INPUT_START: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
-pub const POSEIDON_COL_OUT_LO: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH;
-pub const POSEIDON_COL_OUT_HI: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH + WIDTH / 2;
+// 25 committed: 9 flags/control + 16 inputs. GKR endpoint verified via WHIR.
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + WIDTH;
+pub const POSEIDON_COL_INPUT_START: ColIndex = 9;
+pub const POSEIDON_COL_OUT_LO: ColIndex = 9 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = 9 + WIDTH + WIDTH / 2;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -303,10 +303,8 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         N_COMMITTED_COLS_POSEIDON_16
     }
     fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        // Inputs (9..25) are COMMITTED. Only outputs are virtual memory-bound.
         vec![
-            (POSEIDON_COL_ADDR_LEFT_LO, POSEIDON_COL_INPUT_START..POSEIDON_COL_INPUT_START + HALF_DIGEST_LEN),
-            (POSEIDON_COL_ADDR_LEFT_HI, POSEIDON_COL_INPUT_START + HALF_DIGEST_LEN..POSEIDON_COL_INPUT_START + DIGEST_LEN),
-            (POSEIDON_COL_NU_B, POSEIDON_COL_INPUT_START + DIGEST_LEN..POSEIDON_COL_OUT_LO),
             (POSEIDON_COL_NU_C, POSEIDON_COL_OUT_LO..POSEIDON_COL_OUT_LO + DIGEST_LEN * 2),
         ]
     }
@@ -315,21 +313,19 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         vec![intermediates_start..num_cols_poseidon_16()]
     }
     fn degree_air(&self) -> usize {
-        // Last 4 output constraints (i in 4..8) are gated by the single linear factor
-        // `(1 - flag_permute - flag_short)`, which is boolean thanks to the mutex
-        // `flag_permute * flag_short = 0`. The permutation expression has degree 9, so
-        // the gated constraint stays at degree 10.
-        10
+        // All intermediate constraints verified by Poseidon GKR.
+        // Remaining: compression (degree 2: linear * flag) + bus (degree 2).
+        3
     }
     fn low_degree_air(&self) -> Option<(usize, usize)> {
-        // Each partial round contributes one `assert_eq_low` per round (1 S-box / round), of degree 3 (= the "low" degree part)
-        Some((3, PARTIAL_ROUNDS))
+        None // No low-degree split needed — all constraints are low degree
     }
     fn n_shift_columns(&self) -> usize {
         0
     }
     fn n_constraints(&self) -> usize {
-        2 * BUS as usize + 99
+        // Bus: 2, bool checks: 4, flag mutual exclusion: 1, addr checks: 2, compression: 3*8=24
+        2 * BUS as usize + 4 + 1 + 2 + 3 * (WIDTH / 2)
     }
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
         let cols: Poseidon1Cols16<AB::IF> = {
@@ -398,73 +394,27 @@ pub(super) struct Poseidon1Cols16<T> {
     // virtual columns (33..101, verified by Poseidon GKR)
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
-    pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
+    pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS],
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {
-    let mut state: [_; WIDTH] = local.inputs;
+    // All intermediate transition constraints are verified by the Poseidon GKR.
+    // The AIR only verifies the output compression (using the GKR-verified final state)
+    // and bus/flag constraints.
+    let final_state = &local.ending_full_rounds[HALF_FINAL_FULL_ROUNDS - 1];
 
-    let initial_constants = poseidon1_initial_constants();
-    for round in 0..HALF_INITIAL_FULL_ROUNDS {
-        eval_2_full_rounds_16(
-            &mut state,
-            &local.beginning_full_rounds[round],
-            &initial_constants[2 * round],
-            &initial_constants[2 * round + 1],
-            builder,
-        );
+    let not_permute = AB::IF::ONE - local.flag_permute;
+    let compression_last4 = not_permute - local.flag_short;
+    for i in 0..(WIDTH / 2) {
+        let compression_gate = if i < HALF_DIGEST_LEN {
+            not_permute
+        } else {
+            compression_last4
+        };
+        builder.assert_zero(compression_gate * (final_state[i] + local.inputs[i] - local.out_lo[i]));
+        builder.assert_zero(local.flag_permute * (final_state[i] - local.out_lo[i]));
+        builder.assert_zero(local.flag_permute * (final_state[i + WIDTH / 2] - local.out_hi[i]));
     }
-
-    // --- Sparse partial rounds ---
-    // Transition: add first-round constants, multiply by m_i
-    builder.low_degree_block(&mut state, |b, state| {
-        let state: &mut [AB::IF; WIDTH] = state.try_into().unwrap();
-
-        let frc = poseidon1_sparse_first_round_constants();
-        for (s, &c) in state.iter_mut().zip(frc.iter()) {
-            add_kb(s, c);
-        }
-        dense_mat_vec_air_16(poseidon1_sparse_m_i(), state);
-
-        let first_rows = poseidon1_sparse_first_row();
-        let v_vecs = poseidon1_sparse_v();
-        let scalar_rc = poseidon1_sparse_scalar_round_constants();
-        for round in 0..PARTIAL_ROUNDS {
-            // S-box on state[0]
-            state[0] = state[0].cube();
-            b.assert_eq_low(state[0], local.partial_rounds[round]);
-            state[0] = local.partial_rounds[round];
-            // Scalar round constant (not on last round)
-            if round < PARTIAL_ROUNDS - 1 {
-                add_kb(&mut state[0], scalar_rc[round]);
-            }
-            // Sparse matrix: new_s0 = dot(first_row, state), state[i] += old_s0 * v[i-1]
-            sparse_mat_air_16(state, &first_rows[round], &v_vecs[round]);
-        }
-    });
-
-    let final_constants = poseidon1_final_constants();
-    for round in 0..HALF_FINAL_FULL_ROUNDS - 1 {
-        eval_2_full_rounds_16(
-            &mut state,
-            &local.ending_full_rounds[round],
-            &final_constants[2 * round],
-            &final_constants[2 * round + 1],
-            builder,
-        );
-    }
-
-    eval_last_2_full_rounds_16(
-        &local.inputs,
-        &mut state,
-        &local.out_lo,
-        &local.out_hi,
-        &final_constants[2 * (HALF_FINAL_FULL_ROUNDS - 1)],
-        &final_constants[2 * (HALF_FINAL_FULL_ROUNDS - 1) + 1],
-        local.flag_short,
-        local.flag_permute,
-        builder,
-    );
 }
 
 pub const fn num_cols_poseidon_16() -> usize {

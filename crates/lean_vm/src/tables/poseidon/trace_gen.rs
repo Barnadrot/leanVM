@@ -90,7 +90,7 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
         }
     }
 
-    let n_ending_full_rounds = perm.ending_full_rounds.len();
+    // All ending full round pairs — each pair is a GKR-verified checkpoint
     for (full_round, constants) in perm
         .ending_full_rounds
         .iter_mut()
@@ -99,16 +99,13 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
         generate_2_full_round(&mut state, full_round, &constants[0], &constants[1]);
     }
 
+    // Output compression from the GKR-verified final state (same logic as generate_last_2_full_rounds)
     let flag_permute = *perm.flag_permute;
-    generate_last_2_full_rounds(
-        &mut state,
-        &inputs,
-        &mut perm.out_lo,
-        &mut perm.out_hi,
-        flag_permute,
-        &poseidon1_final_constants()[2 * n_ending_full_rounds],
-        &poseidon1_final_constants()[2 * n_ending_full_rounds + 1],
-    );
+    for i in 0..(WIDTH / 2) {
+        let compression_value = state[i] + inputs[i];
+        *perm.out_lo[i] = (F::ONE - flag_permute) * compression_value + flag_permute * state[i];
+        *perm.out_hi[i] = flag_permute * state[i + WIDTH / 2];
+    }
 }
 
 #[inline]
