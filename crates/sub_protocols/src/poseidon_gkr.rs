@@ -246,6 +246,7 @@ impl TransitionPrecomp {
     }
 }
 
+#[inline(always)]
 fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], pre: &TransitionPrecomp, start: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
     let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i)]));
     let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i) + 1]));
