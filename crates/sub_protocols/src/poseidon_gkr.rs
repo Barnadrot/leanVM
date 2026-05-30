@@ -189,7 +189,7 @@ fn row_pair_contributions(a: &[EF; WIDTH], b: &[EF; WIDTH], eq_lo: EF, eq_hi: EF
     result
 }
 
-fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], start: usize, _half: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [EF; 5] {
+fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], start: usize, _half: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
     let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i)]));
     let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i) + 1]));
     let diff_eq_p = eq_hi_p - eq_lo_p;
@@ -199,7 +199,7 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
         d_p[k] = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| folded_prev[2 * (start + i) + 1][k])) - a_p[k];
     }
     let eq_el: [PEF; WIDTH] = std::array::from_fn(|k| PEF::from(eq_p_el[k]));
-    let mut result = [EF::ZERO; 5];
+    let mut result = [PEF::default(); 5];
     if (5..=24).contains(&t) {
         let r = t - 5;
         let mut cw = eq_el[0] * c.first_rows[r][0];
@@ -212,7 +212,7 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
             let s0 = a_p[0] + d_p[0] * pt;
             let mut cubed = s0 * s0 * s0;
             if r < 19 { cubed += c.scalar_rc[r]; }
-            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * ((lc + ls * pt) + cw * cubed));
+            result[idx] += (eq_lo_p + diff_eq_p * pt) * ((lc + ls * pt) + cw * cubed);
         }
     } else if t <= 3 || t >= 25 {
         let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t - 25], _ => unreachable!() };
@@ -224,7 +224,7 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
             mds_circ_16(&mut state);
             let mut w = PEF::default();
             for k in 0..WIDTH { w += eq_el[k] * state[k]; }
-            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
+            result[idx] += (eq_lo_p + diff_eq_p * pt) * w;
         }
     } else {
         for idx in 0..n_evals {
@@ -236,7 +236,7 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
             for k in 0..WIDTH { interp[k] = PEF::default(); for j in 0..WIDTH { interp[k] += inp[j] * c.m_i[k][j]; } }
             let mut w = PEF::default();
             for k in 0..WIDTH { w += eq_el[k] * interp[k]; }
-            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
+            result[idx] += (eq_lo_p + diff_eq_p * pt) * w;
         }
     }
     result
@@ -290,13 +290,15 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let n_packed = half / PACK_WIDTH;
 
             let mut raw_evals: Vec<EF> = if n_packed >= RAYON_CHUNK / PACK_WIDTH {
-                let sums = (0..n_packed).into_par_iter()
-                    .fold(|| [EF::ZERO; 5], |mut acc, p| {
-                        let contrib = packed_row_pairs(&folded_prev, &eq_table, &eq_p_el, p * PACK_WIDTH, half, t, n_evals, &c);
+                // Accumulate in packed form (defer hsum to after reduction)
+                let packed_sums = (0..n_packed).into_par_iter()
+                    .fold(|| [PEF::default(); 5], |mut acc, p| {
+                        let contrib = packed_row_pairs_pef(&folded_prev, &eq_table, &eq_p_el, p * PACK_WIDTH, half, t, n_evals, &c);
                         for point in 0..n_evals { acc[point] += contrib[point]; } acc
                     })
-                    .reduce(|| [EF::ZERO; 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
-                let mut evals = sums[..n_evals].to_vec();
+                    .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
+                // Single hsum per eval point (not per chunk!)
+                let mut evals: Vec<EF> = (0..n_evals).map(|p| hsum_pef(packed_sums[p])).collect();
                 for h in (n_packed * PACK_WIDTH)..half {
                     let contrib = row_pair_contributions(&folded_prev[2*h], &folded_prev[2*h+1], eq_table[2*h], eq_table[2*h+1], &eq_p_el, t, n_evals, &c);
                     for point in 0..n_evals { evals[point] += contrib[point]; }
@@ -326,6 +328,7 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let r_v: EF = prover_state.sample();
             challenges.push(r_v);
             let one_minus_r = EF::ONE - r_v;
+            // In-place fold: safe because h < 2h, so writes don't overwrite unread data
             if half >= RAYON_CHUNK {
                 let new_eq: Vec<EF> = eq_table.par_chunks_exact(2).map(|pair| pair[0] * one_minus_r + pair[1] * r_v).collect();
                 let new_prev: Vec<[EF; WIDTH]> = folded_prev.par_chunks_exact(2).map(|pair| std::array::from_fn(|k| pair[0][k] * one_minus_r + pair[1][k] * r_v)).collect();
