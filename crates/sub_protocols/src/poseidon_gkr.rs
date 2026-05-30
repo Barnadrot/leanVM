@@ -268,11 +268,10 @@ fn packed_row_pairs_base(prev: &[[F; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], s
 /// Precomputed constants for a specific transition type, avoiding per-pack recomputation
 struct TransitionPrecomp {
     eq_el: [PEF; WIDTH],
-    // For partial rounds: cw and weight vector
     cw: PEF,
     weights: [PEF; WIDTH],
-    // For full rounds: MDS^T * eq_el — allows skipping explicit MDS in the hot loop
     mds_t_eq: [PEF; WIDTH],
+    mi_t_eq: [PEF; WIDTH], // M_i^T * eq_el for linear transition
 }
 
 impl TransitionPrecomp {
@@ -295,7 +294,16 @@ impl TransitionPrecomp {
             for j in 0..WIDTH { acc += eq_el[j] * MDS_COL[(j + WIDTH - k) % WIDTH]; }
             acc
         });
-        Self { eq_el, cw, weights, mds_t_eq }
+        // M_i^T * eq_el for linear transition
+        let mi_t_eq: [PEF; WIDTH] = if t == 4 {
+            let mi = poseidon1_sparse_m_i();
+            std::array::from_fn(|k| {
+                let mut acc = PEF::default();
+                for j in 0..WIDTH { acc += eq_el[j] * mi[j][k]; }
+                acc
+            })
+        } else { [PEF::default(); WIDTH] };
+        Self { eq_el, cw, weights, mds_t_eq, mi_t_eq }
     }
 }
 
@@ -337,15 +345,14 @@ fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], pre: &Tran
             result[idx] += (eq_lo_p + diff_eq_p * pt) * w;
         }
     } else {
+        // t=4: linear transition. <eq_el, M_i*(state+frc)> = <M_i^T*eq_el, state+frc>
         for idx in 0..n_evals {
             let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
-            let mut interp: [PEF; WIDTH] = std::array::from_fn(|k| a_p[k] + d_p[k] * pt);
-            for (s, &rc) in interp.iter_mut().zip(c.frc.iter()) { *s += rc; }
-            let inp = interp;
-            for k in 0..WIDTH { interp[k] = PEF::default(); for j in 0..WIDTH { interp[k] += inp[j] * c.m_i[k][j]; } }
             let mut w = PEF::default();
-            for k in 0..WIDTH { w += eq_el[k] * interp[k]; }
+            for k in 0..WIDTH {
+                w += pre.mi_t_eq[k] * (a_p[k] + d_p[k] * pt + c.frc[k]);
+            }
             result[idx] += (eq_lo_p + diff_eq_p * pt) * w;
         }
     }
@@ -474,8 +481,14 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             let one_minus_r = EF::ONE - r_v;
             // In-place fold: safe because h < 2h, so writes don't overwrite unread data
             if half >= RAYON_CHUNK {
-                let new_eq: Vec<EF> = eq_table.par_chunks_exact(2).map(|pair| pair[0] * one_minus_r + pair[1] * r_v).collect();
-                let new_prev: Vec<[EF; WIDTH]> = folded_prev.par_chunks_exact(2).map(|pair| std::array::from_fn(|k| pair[0][k] * one_minus_r + pair[1][k] * r_v)).collect();
+                // Fused fold: eq and prev folded in a single parallel pass
+                let mut new_eq: Vec<EF> = Vec::with_capacity(half);
+                let mut new_prev: Vec<[EF; WIDTH]> = Vec::with_capacity(half);
+                unsafe { new_eq.set_len(half); new_prev.set_len(half); }
+                new_eq.par_iter_mut().zip(new_prev.par_iter_mut()).enumerate().for_each(|(h, (eq_out, prev_out))| {
+                    *eq_out = eq_table[2*h] * one_minus_r + eq_table[2*h+1] * r_v;
+                    *prev_out = std::array::from_fn(|k| folded_prev[2*h][k] * one_minus_r + folded_prev[2*h+1][k] * r_v);
+                });
                 eq_table = new_eq; folded_prev = new_prev;
             } else {
                 for h in 0..half { eq_table[h] = eq_table[2*h] * one_minus_r + eq_table[2*h+1] * r_v; for k in 0..WIDTH { folded_prev[h][k] = folded_prev[2*h][k] * one_minus_r + folded_prev[2*h+1][k] * r_v; } }
