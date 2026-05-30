@@ -537,7 +537,6 @@ pub fn prove_execution(
         &tables_log_heights,
         &committed_statements,
     );
-
     WhirConfig::new(whir_config, stacked_pcs_witness.global_polynomial.by_ref().n_vars()).prove(
         &mut prover_state,
         global_statements_base,
