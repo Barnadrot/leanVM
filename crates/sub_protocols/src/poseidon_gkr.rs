@@ -154,6 +154,8 @@ fn sumcheck_degree(t: usize) -> usize { match t { 4 => 2, _ => 4 } }
 
 #[inline(always)]
 fn row_pair_contributions(a: &[EF; WIDTH], b: &[EF; WIDTH], eq_lo: EF, eq_hi: EF, eq_p_el: &[EF], t: usize, n_evals: usize, c: &PoseidonConstants) -> [EF; 5] {
+    // n_evals = degree (not degree+1): evaluate at 0, 2, 3, ..., degree
+    // p(1) will be derived from p(0) + p(1) = claimed_sum at the aggregation level
     let diff_eq = eq_hi - eq_lo;
     let mut diffs = [EF::ZERO; WIDTH];
     for k in 0..WIDTH { diffs[k] = b[k] - a[k]; }
@@ -164,23 +166,25 @@ fn row_pair_contributions(a: &[EF; WIDTH], b: &[EF; WIDTH], eq_lo: EF, eq_hi: EF
         let mut lc = EF::ZERO; let mut ls = EF::ZERO;
         for k in 1..WIDTH { let w = eq_p_el[k] + eq_p_el[0] * c.first_rows[r][k]; lc += w * a[k]; ls += w * diffs[k]; }
         let mut result = [EF::ZERO; 5];
-        for point in 0..n_evals {
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 }; // points: 0, 2, 3, ..., degree
             let pt = F::from_usize(point);
             let s0 = a[0] + diffs[0] * pt;
             let mut cubed = s0.cube();
             if r < 19 { cubed += c.scalar_rc[r]; }
-            result[point] = (eq_lo + diff_eq * pt) * ((lc + ls * pt) + cw * cubed);
+            result[idx] = (eq_lo + diff_eq * pt) * ((lc + ls * pt) + cw * cubed);
         }
         return result;
     }
     let mut result = [EF::ZERO; 5];
-    for point in 0..n_evals {
+    for idx in 0..n_evals {
+        let point = if idx == 0 { 0 } else { idx + 1 };
         let pt = F::from_usize(point);
         let prev_interp: [EF; WIDTH] = std::array::from_fn(|k| a[k] + diffs[k] * pt);
         let out = apply_transition_to_evals(t, &prev_interp, c);
         let mut w = EF::ZERO;
         for k in 0..WIDTH { w += eq_p_el[k] * out[k]; }
-        result[point] = (eq_lo + diff_eq * pt) * w;
+        result[idx] = (eq_lo + diff_eq * pt) * w;
     }
     result
 }
@@ -202,26 +206,29 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
         for k in 1..WIDTH { cw += eq_el[k] * c.v_vecs[r][k - 1]; }
         let mut lc = PEF::default(); let mut ls = PEF::default();
         for k in 1..WIDTH { let w = eq_el[k] + eq_el[0] * c.first_rows[r][k]; lc += w * a_p[k]; ls += w * d_p[k]; }
-        for point in 0..n_evals {
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
             let s0 = a_p[0] + d_p[0] * pt;
             let mut cubed = s0 * s0 * s0;
             if r < 19 { cubed += c.scalar_rc[r]; }
-            result[point] += hsum_pef((eq_lo_p + diff_eq_p * pt) * ((lc + ls * pt) + cw * cubed));
+            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * ((lc + ls * pt) + cw * cubed));
         }
     } else if t <= 3 || t >= 25 {
         let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t - 25], _ => unreachable!() };
-        for point in 0..n_evals {
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
             let mut state: [PEF; WIDTH] = std::array::from_fn(|k| a_p[k] + d_p[k] * pt + rc[k]);
             for k in 0..WIDTH { state[k] = state[k] * state[k] * state[k]; }
             mds_circ_16(&mut state);
             let mut w = PEF::default();
             for k in 0..WIDTH { w += eq_el[k] * state[k]; }
-            result[point] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
+            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
         }
     } else {
-        for point in 0..n_evals {
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
             let mut interp: [PEF; WIDTH] = std::array::from_fn(|k| a_p[k] + d_p[k] * pt);
             for (s, &rc) in interp.iter_mut().zip(c.frc.iter()) { *s += rc; }
@@ -229,7 +236,7 @@ fn packed_row_pairs(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF]
             for k in 0..WIDTH { interp[k] = PEF::default(); for j in 0..WIDTH { interp[k] += inp[j] * c.m_i[k][j]; } }
             let mut w = PEF::default();
             for k in 0..WIDTH { w += eq_el[k] * interp[k]; }
-            result[point] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
+            result[idx] += hsum_pef((eq_lo_p + diff_eq_p * pt) * w);
         }
     }
     result
@@ -279,10 +286,10 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
 
         for v in 0..log_n_rows {
             let half = n >> (v + 1);
-            let n_evals = degree + 1;
+            let n_evals = degree; // Skip point 1 — derived from sum
             let n_packed = half / PACK_WIDTH;
 
-            let evals: Vec<EF> = if n_packed >= RAYON_CHUNK / PACK_WIDTH {
+            let mut raw_evals: Vec<EF> = if n_packed >= RAYON_CHUNK / PACK_WIDTH {
                 let sums = (0..n_packed).into_par_iter()
                     .fold(|| [EF::ZERO; 5], |mut acc, p| {
                         let contrib = packed_row_pairs(&folded_prev, &eq_table, &eq_p_el, p * PACK_WIDTH, half, t, n_evals, &c);
@@ -296,7 +303,6 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
                 }
                 evals
             } else if half >= 256 {
-                // Scalar + rayon parallel
                 let sums = (0..half).into_par_iter()
                     .fold(|| [EF::ZERO; 5], |mut acc, h| {
                         let contrib = row_pair_contributions(&folded_prev[2*h], &folded_prev[2*h+1], eq_table[2*h], eq_table[2*h+1], &eq_p_el, t, n_evals, &c);
@@ -312,7 +318,10 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
                 }
                 evals
             };
-            let coeffs = evals_to_coeffs(&evals);
+            // Insert p(1) = current_claim - p(0) at position 1
+            let p_at_1 = current_claim - raw_evals[0];
+            raw_evals.insert(1, p_at_1);
+            let coeffs = evals_to_coeffs(&raw_evals);
             prover_state.add_extension_scalars(&coeffs);
             let r_v: EF = prover_state.sample();
             challenges.push(r_v);
