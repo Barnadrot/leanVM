@@ -230,16 +230,22 @@ fn packed_row_pairs_base(prev: &[[F; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], s
         }
     } else if t <= 3 || t >= 25 {
         let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t - 25], _ => unreachable!() };
+        // Precompute MDS^T * eq_el for base-field full rounds
+        const MDS_COL_BF: [F; WIDTH] = F::new_array([1, 3, 13, 22, 67, 2, 15, 63, 101, 1, 2, 17, 11, 1, 51, 1]);
+        let mds_t_eq_bf: [PEF; WIDTH] = std::array::from_fn(|k| {
+            let mut acc = PEF::default();
+            for j in 0..WIDTH { acc += eq_el[j] * MDS_COL_BF[(j + WIDTH - k) % WIDTH]; }
+            acc
+        });
         for idx in 0..n_evals {
             let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
-            // Compute transition in base field
-            let mut state_bf: [PBF; WIDTH] = std::array::from_fn(|k| a_bf[k] + d_bf[k] * pt + rc[k]);
-            for k in 0..WIDTH { state_bf[k] = state_bf[k] * state_bf[k] * state_bf[k]; }
-            mds_circ_16(&mut state_bf);
-            // Dot product with eq_p_el (EF weights × F values → PEF)
+            // <eq_el, MDS(cube(s+rc))> = <MDS^T*eq_el, cube(s+rc)>
             let mut w = PEF::default();
-            for k in 0..WIDTH { w += eq_el[k] * state_bf[k]; }
+            for k in 0..WIDTH {
+                let s = a_bf[k] + d_bf[k] * pt + rc[k];
+                w += mds_t_eq_bf[k] * (s * s * s);
+            }
             result[idx] = (eq_lo_p + diff_eq_p * pt) * w;
         }
     } else {
@@ -264,7 +270,9 @@ struct TransitionPrecomp {
     eq_el: [PEF; WIDTH],
     // For partial rounds: cw and weight vector
     cw: PEF,
-    weights: [PEF; WIDTH], // w_k = eq_el[k] + eq_el[0] * first_rows[r][k]
+    weights: [PEF; WIDTH],
+    // For full rounds: MDS^T * eq_el — allows skipping explicit MDS in the hot loop
+    mds_t_eq: [PEF; WIDTH],
 }
 
 impl TransitionPrecomp {
@@ -279,7 +287,15 @@ impl TransitionPrecomp {
         } else {
             (PEF::default(), [PEF::default(); WIDTH])
         };
-        Self { eq_el, cw, weights }
+        // Precompute MDS^T * eq_el: (MDS^T * eq_el)[k] = Σ_j MDS[j][k] * eq_el[j]
+        // For circulant MDS with column c: MDS[j][k] = c[(j-k) mod 16]
+        const MDS_COL: [F; WIDTH] = F::new_array([1, 3, 13, 22, 67, 2, 15, 63, 101, 1, 2, 17, 11, 1, 51, 1]);
+        let mds_t_eq: [PEF; WIDTH] = std::array::from_fn(|k| {
+            let mut acc = PEF::default();
+            for j in 0..WIDTH { acc += eq_el[j] * MDS_COL[(j + WIDTH - k) % WIDTH]; }
+            acc
+        });
+        Self { eq_el, cw, weights, mds_t_eq }
     }
 }
 
@@ -312,11 +328,12 @@ fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], pre: &Tran
         for idx in 0..n_evals {
             let point = if idx == 0 { 0 } else { idx + 1 };
             let pt = F::from_usize(point);
-            let mut state: [PEF; WIDTH] = std::array::from_fn(|k| a_p[k] + d_p[k] * pt + rc[k]);
-            for k in 0..WIDTH { state[k] = state[k] * state[k] * state[k]; }
-            mds_circ_16(&mut state);
+            // <eq_el, MDS(cube(s+rc))> = <MDS^T*eq_el, cube(s+rc)> — skips explicit MDS
             let mut w = PEF::default();
-            for k in 0..WIDTH { w += eq_el[k] * state[k]; }
+            for k in 0..WIDTH {
+                let s = a_p[k] + d_p[k] * pt + rc[k];
+                w += pre.mds_t_eq[k] * (s * s * s);
+            }
             result[idx] += (eq_lo_p + diff_eq_p * pt) * w;
         }
     } else {
