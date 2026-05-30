@@ -189,6 +189,76 @@ fn row_pair_contributions(a: &[EF; WIDTH], b: &[EF; WIDTH], eq_lo: EF, eq_hi: EF
     result
 }
 
+type PBF = <F as Field>::Packing;
+const BF_PACK_WIDTH: usize = <PBF as PackedValue>::WIDTH;
+
+/// First-round base-field evaluation: checkpoint data is F, only eq/dot products are EF.
+/// The transition (cube, MDS) runs entirely in packed base field, then dot with eq_p_el gives PEF.
+fn packed_row_pairs_base(prev: &[[F; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], start: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
+    let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i)]));
+    let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i) + 1]));
+    let diff_eq_p = eq_hi_p - eq_lo_p;
+    let eq_el: [PEF; WIDTH] = std::array::from_fn(|k| PEF::from(eq_p_el[k]));
+
+    // Load base-field state into packed base field
+    let mut a_bf = [PBF::default(); WIDTH]; let mut d_bf = [PBF::default(); WIDTH];
+    for k in 0..WIDTH {
+        a_bf[k] = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[2 * (start + i)][k]));
+        d_bf[k] = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[2 * (start + i) + 1][k])) - a_bf[k];
+    }
+
+    let mut result = [PEF::default(); 5];
+    if (5..=24).contains(&t) {
+        let r = t - 5;
+        // Partial round: cube s0, sparse update, then dot with eq_p_el
+        // Precompute eq-weighted constants (EF)
+        let mut cw = eq_el[0] * c.first_rows[r][0];
+        for k in 1..WIDTH { cw += eq_el[k] * c.v_vecs[r][k - 1]; }
+        // eq-weighted column sums for linear part
+        let mut w_k = [PEF::default(); WIDTH];
+        for k in 1..WIDTH { w_k[k] = eq_el[k] + eq_el[0] * c.first_rows[r][k]; }
+        let mut lc = PEF::default(); let mut ls = PEF::default();
+        for k in 1..WIDTH { lc += w_k[k] * a_bf[k]; ls += w_k[k] * d_bf[k]; }
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
+            let pt = F::from_usize(point);
+            let s0_bf = a_bf[0] + d_bf[0] * pt;
+            let cubed_bf = s0_bf * s0_bf * s0_bf;
+            let mut cubed_pef = PEF::from(cubed_bf);
+            if r < 19 { cubed_pef += c.scalar_rc[r]; }
+            result[idx] = (eq_lo_p + diff_eq_p * pt) * ((lc + ls * pt) + cw * cubed_pef);
+        }
+    } else if t <= 3 || t >= 25 {
+        let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t - 25], _ => unreachable!() };
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
+            let pt = F::from_usize(point);
+            // Compute transition in base field
+            let mut state_bf: [PBF; WIDTH] = std::array::from_fn(|k| a_bf[k] + d_bf[k] * pt + rc[k]);
+            for k in 0..WIDTH { state_bf[k] = state_bf[k] * state_bf[k] * state_bf[k]; }
+            mds_circ_16(&mut state_bf);
+            // Dot product with eq_p_el (EF weights × F values → PEF)
+            let mut w = PEF::default();
+            for k in 0..WIDTH { w += eq_el[k] * state_bf[k]; }
+            result[idx] = (eq_lo_p + diff_eq_p * pt) * w;
+        }
+    } else {
+        // Linear transition (t=4)
+        for idx in 0..n_evals {
+            let point = if idx == 0 { 0 } else { idx + 1 };
+            let pt = F::from_usize(point);
+            let mut interp_bf: [PBF; WIDTH] = std::array::from_fn(|k| a_bf[k] + d_bf[k] * pt);
+            for (s, &rc) in interp_bf.iter_mut().zip(c.frc.iter()) { *s += rc; }
+            let inp = interp_bf;
+            for k in 0..WIDTH { interp_bf[k] = PBF::default(); for j in 0..WIDTH { interp_bf[k] += inp[j] * c.m_i[k][j]; } }
+            let mut w = PEF::default();
+            for k in 0..WIDTH { w += eq_el[k] * interp_bf[k]; }
+            result[idx] = (eq_lo_p + diff_eq_p * pt) * w;
+        }
+    }
+    result
+}
+
 fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], eq_p_el: &[EF], start: usize, _half: usize, t: usize, n_evals: usize, c: &PoseidonConstants) -> [PEF; 5] {
     let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i)]));
     let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2 * (start + i) + 1]));
@@ -281,23 +351,56 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
 
         let extra = PoseidonExtraData { eq_p_el: eq_p_el.clone(), c: poseidon_constants() };
         let mut eq_table = eval_eq(&p_row);
-        let mut folded_prev: Vec<[EF; WIDTH]> = prev.par_iter().map(|row| std::array::from_fn(|k| EF::from(row[k]))).collect();
         let mut challenges = Vec::with_capacity(log_n_rows);
 
-        for v in 0..log_n_rows {
+        // First round (v=0): evaluate in base field, avoid F→EF conversion
+        {
+            let half = n >> 1;
+            let n_evals = degree;
+            let n_packed_bf = half / BF_PACK_WIDTH;
+
+            let mut raw_evals: Vec<EF> = if n_packed_bf >= RAYON_CHUNK / BF_PACK_WIDTH {
+                let packed_sums = (0..n_packed_bf).into_par_iter()
+                    .fold(|| [PEF::default(); 5], |mut acc, p| {
+                        let contrib = packed_row_pairs_base(prev, &eq_table, &eq_p_el, p * BF_PACK_WIDTH, t, n_evals, &c);
+                        for point in 0..n_evals { acc[point] += contrib[point]; } acc
+                    })
+                    .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
+                (0..n_evals).map(|p| hsum_pef(packed_sums[p])).collect()
+            } else {
+                vec![EF::ZERO; n_evals] // fallback for tiny sizes
+            };
+            let p_at_1 = current_claim - raw_evals[0];
+            raw_evals.insert(1, p_at_1);
+            let coeffs = evals_to_coeffs(&raw_evals);
+            prover_state.add_extension_scalars(&coeffs);
+            let r_v: EF = prover_state.sample();
+            challenges.push(r_v);
+            let one_minus_r = EF::ONE - r_v;
+            // Fold from F to EF using the challenge
+            eq_table = eq_table.par_chunks_exact(2).map(|pair| pair[0] * one_minus_r + pair[1] * r_v).collect();
+            current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
+        }
+
+        // Remaining rounds (v=1..): folded_prev is EF
+        let mut folded_prev: Vec<[EF; WIDTH]> = prev.par_chunks_exact(2).map(|pair| {
+            let r_v = challenges[0];
+            let one_minus_r = EF::ONE - r_v;
+            std::array::from_fn(|k| EF::from(pair[0][k]) * one_minus_r + EF::from(pair[1][k]) * r_v)
+        }).collect();
+
+        for v in 1..log_n_rows {
             let half = n >> (v + 1);
-            let n_evals = degree; // Skip point 1 — derived from sum
+            let n_evals = degree;
             let n_packed = half / PACK_WIDTH;
 
             let mut raw_evals: Vec<EF> = if n_packed >= RAYON_CHUNK / PACK_WIDTH {
-                // Accumulate in packed form (defer hsum to after reduction)
                 let packed_sums = (0..n_packed).into_par_iter()
                     .fold(|| [PEF::default(); 5], |mut acc, p| {
                         let contrib = packed_row_pairs_pef(&folded_prev, &eq_table, &eq_p_el, p * PACK_WIDTH, half, t, n_evals, &c);
                         for point in 0..n_evals { acc[point] += contrib[point]; } acc
                     })
                     .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
-                // Single hsum per eval point (not per chunk!)
                 let mut evals: Vec<EF> = (0..n_evals).map(|p| hsum_pef(packed_sums[p])).collect();
                 for h in (n_packed * PACK_WIDTH)..half {
                     let contrib = row_pair_contributions(&folded_prev[2*h], &folded_prev[2*h+1], eq_table[2*h], eq_table[2*h+1], &eq_p_el, t, n_evals, &c);
