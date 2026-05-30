@@ -389,12 +389,128 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
         }
 
-        // Fold from F to EF
+        // Second round (v=1): use (F coefficient) representation
+        // After round 0 fold: folded[h] = prev[2h] + (prev[2h+1]-prev[2h])*r0
+        // For round 1 pairs at (2h,2h+1) of folded: these map to prev[4h..4h+3]
+        // lo_coeff = (prev[4h], prev[4h+1]-prev[4h]) → A=prev[4h], D=prev[4h+1]-prev[4h]
+        // hi_coeff = (prev[4h+2], prev[4h+3]-prev[4h+2])
+        // At interp pt: state_A = A_lo + (A_hi - A_lo)*pt = prev[4h] + (prev[4h+2]-prev[4h])*pt
+        //               state_D = D_lo + (D_hi - D_lo)*pt
+        //               state = state_A + state_D * r0
         let r0 = challenges[0];
-        let mut folded_prev: Vec<[EF; WIDTH]> = prev.par_chunks_exact(2).map(|pair| {
-            std::array::from_fn(|k| EF::from(pair[0][k]) + EF::from(pair[1][k] - pair[0][k]) * r0)
-        }).collect();
-        for v in 1..log_n_rows {
+        let start_v;
+        let mut folded_prev: Vec<[EF; WIDTH]>;
+        if n >= 4 * RAYON_CHUNK && log_n_rows > 1 {
+            let half2 = n >> 2;
+            let n_evals = degree;
+            let n_packed_bf = half2 / BF_PACK_WIDTH;
+            let one_minus_r0 = EF::ONE - r0;
+
+            let mut raw_evals: Vec<EF> = if n_packed_bf >= RAYON_CHUNK / BF_PACK_WIDTH {
+                let packed_sums = (0..n_packed_bf).into_par_iter()
+                    .fold(|| [PEF::default(); 5], |mut acc, p| {
+                        let start = p * BF_PACK_WIDTH;
+                        let eq_lo_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2*(start+i)]));
+                        let eq_hi_p = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| eq_table[2*(start+i)+1]));
+                        let diff_eq_p = eq_hi_p - eq_lo_p;
+
+                        for idx in 0..n_evals {
+                            let point = if idx == 0 { 0 } else { idx + 1 };
+                            let pt = F::from_usize(point);
+                            // A_k = prev[4(start+i)][k] + (prev[4(start+i)+2][k] - prev[4(start+i)][k]) * pt
+                            // D_k = (prev[4(start+i)+1][k] - prev[4(start+i)][k]) + (prev[4(start+i)+3][k] - prev[4(start+i)+2][k] - prev[4(start+i)+1][k] + prev[4(start+i)][k]) * pt
+                            let mut a_bf = [PBF::default(); WIDTH];
+                            let mut d_bf = [PBF::default(); WIDTH];
+                            for k in 0..WIDTH {
+                                let v0 = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[4*(start+i)][k]));
+                                let v1 = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[4*(start+i)+1][k]));
+                                let v2 = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[4*(start+i)+2][k]));
+                                let v3 = *PBF::from_slice(&std::array::from_fn::<F, BF_PACK_WIDTH, _>(|i| prev[4*(start+i)+3][k]));
+                                a_bf[k] = v0 + (v2 - v0) * pt;
+                                d_bf[k] = (v1 - v0) + (v3 - v2 - v1 + v0) * pt;
+                            }
+                            // state[k] = a_bf[k] + d_bf[k] * r0 — evaluate transition with mixed arith
+                            let eval = if (5..=24).contains(&t) {
+                                let r = t - 5;
+                                // Partial: <weights, state> = <weights, A> + <weights, D>*r0 (PEF×PBF)
+                                let mut wa = PEF::default(); let mut wd = PEF::default();
+                                for k in 1..WIDTH { wa += pre.weights[k] * a_bf[k]; wd += pre.weights[k] * d_bf[k]; }
+                                let lin = wa + wd * r0;
+                                // cube(s0) = cube(A0 + D0*r0)
+                                let a0 = a_bf[0]; let d0 = d_bf[0];
+                                let cube_a = a0 * a0 * a0;
+                                let cube_d = d0 * d0 * d0;
+                                let three_a2d = a0 * a0 * d0 * F::from_usize(3);
+                                let three_ad2 = a0 * d0 * d0 * F::from_usize(3);
+                                let r0_sq = r0 * r0; let r0_cu = r0_sq * r0;
+                                let mut cubed = PEF::from(cube_a) + PEF::from(three_a2d) * r0
+                                    + PEF::from(three_ad2) * r0_sq + PEF::from(cube_d) * r0_cu;
+                                if r < 19 { cubed += c.scalar_rc[r]; }
+                                lin + pre.cw * cubed
+                            } else if t <= 3 || t >= 25 {
+                                // Full round: cube(A_k+rc + D_k*r0) for each k
+                                let r0_sq = r0 * r0; let r0_cu = r0_sq * r0;
+                                let rc = match t { 0..=3 => &c.initial_rc[t], 25..=28 => &c.final_rc[t-25], _ => unreachable!() };
+                                let mut w = PEF::default();
+                                for k in 0..WIDTH {
+                                    let ak = a_bf[k] + rc[k]; let dk = d_bf[k];
+                                    let cube_pef = PEF::from(ak*ak*ak) + PEF::from(ak*ak*dk * F::from_usize(3)) * r0
+                                        + PEF::from(ak*dk*dk * F::from_usize(3)) * r0_sq + PEF::from(dk*dk*dk) * r0_cu;
+                                    w += pre.mds_t_eq[k] * cube_pef;
+                                }
+                                w
+                            } else {
+                                // Linear: <mi_t_eq, A+frc> + <mi_t_eq, D>*r0
+                                let mut wa = PEF::default(); let mut wd = PEF::default();
+                                for k in 0..WIDTH { wa += pre.mi_t_eq[k] * (a_bf[k] + c.frc[k]); wd += pre.mi_t_eq[k] * d_bf[k]; }
+                                wa + wd * r0
+                            };
+                            acc[idx] += (eq_lo_p + diff_eq_p * pt) * eval;
+                        }
+                        acc
+                    })
+                    .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
+                (0..n_evals).map(|p| hsum_pef(packed_sums[p])).collect()
+            } else {
+                // Scalar fallback for second round with small tables
+                let mut evals = vec![EF::ZERO; n_evals];
+                // Fold F→EF for small case and use row_pair_contributions
+                let tmp_folded: Vec<[EF; WIDTH]> = prev.par_chunks_exact(2).map(|pair| {
+                    std::array::from_fn(|k| EF::from(pair[0][k]) + EF::from(pair[1][k] - pair[0][k]) * r0)
+                }).collect();
+                for h in 0..half2 {
+                    let contrib = row_pair_contributions(&tmp_folded[2*h], &tmp_folded[2*h+1], eq_table[2*h], eq_table[2*h+1], &eq_p_el, t, n_evals, &c);
+                    for point in 0..n_evals { evals[point] += contrib[point]; }
+                }
+                evals
+            };
+            let p_at_1 = current_claim - raw_evals[0];
+            raw_evals.insert(1, p_at_1);
+            let coeffs = evals_to_coeffs(&raw_evals);
+            prover_state.add_extension_scalars(&coeffs);
+            let r_v: EF = prover_state.sample();
+            challenges.push(r_v);
+            eq_table = eq_table.par_chunks_exact(2).map(|p| p[0] + (p[1] - p[0]) * r_v).collect();
+            current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
+
+            // Fold F → EF using both challenges
+            let r1 = challenges[1];
+            folded_prev = prev.par_chunks_exact(4).map(|q| {
+                std::array::from_fn(|k| {
+                    let lo = EF::from(q[0][k]) + EF::from(q[1][k] - q[0][k]) * r0;
+                    let hi = EF::from(q[2][k]) + EF::from(q[3][k] - q[2][k]) * r0;
+                    lo + (hi - lo) * r1
+                })
+            }).collect();
+            start_v = 2;
+        } else {
+            folded_prev = prev.par_chunks_exact(2).map(|pair| {
+                std::array::from_fn(|k| EF::from(pair[0][k]) + EF::from(pair[1][k] - pair[0][k]) * r0)
+            }).collect();
+            start_v = 1;
+        }
+
+        for v in start_v..log_n_rows {
             let half = n >> (v + 1);
             let n_evals = degree;
             let n_packed = half / PACK_WIDTH;
