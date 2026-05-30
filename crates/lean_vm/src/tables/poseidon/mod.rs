@@ -29,6 +29,10 @@ fn mds_air_16<A: PrimeCharacteristicRing + 'static>(state: &mut [A; WIDTH]) {
     unreachable!()
 }
 
+pub fn mds_dense_16_pub() -> &'static [[F; 16]; 16] {
+    mds_dense_16()
+}
+
 fn mds_dense_16() -> &'static [[F; 16]; 16] {
     use std::sync::OnceLock;
     static MAT: OnceLock<[[KoalaBear; 16]; 16]> = OnceLock::new();
@@ -105,12 +109,11 @@ pub const POSEIDON_COL_FLAG_SHORT: ColIndex = 5;
 pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
+// 9 committed: 9 flags/control columns; 68 intermediates are virtual (verified by Poseidon GKR)
 pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9;
-// virtual columns (memory-bound, verified by combined GKR)
 pub const POSEIDON_COL_INPUT_START: ColIndex = N_COMMITTED_COLS_POSEIDON_16;
 pub const POSEIDON_COL_OUT_LO: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH;
 pub const POSEIDON_COL_OUT_HI: ColIndex = N_COMMITTED_COLS_POSEIDON_16 + WIDTH + WIDTH / 2;
-// virtual columns (deterministic intermediates — verified by Poseidon GKR)
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -374,7 +377,7 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
 #[repr(C)]
 #[derive(Debug)]
 pub(super) struct Poseidon1Cols16<T> {
-    // committed columns (stacked in PCS)
+    // committed columns (0..9, stacked in PCS)
     pub multiplicity: T,
     pub nu_b: T,
     pub nu_c: T,
@@ -384,11 +387,11 @@ pub(super) struct Poseidon1Cols16<T> {
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    // virtual columns (memory-bound, verified by combined GKR)
+    // virtual columns (9..33, memory-bound via Shout)
     pub inputs: [T; WIDTH],
     pub out_lo: [T; WIDTH / 2],
     pub out_hi: [T; WIDTH / 2],
-    // virtual columns (deterministic intermediates, verified by Poseidon GKR)
+    // virtual columns (33..101, verified by Poseidon GKR)
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
     pub partial_rounds: [T; PARTIAL_ROUNDS],
     pub ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],

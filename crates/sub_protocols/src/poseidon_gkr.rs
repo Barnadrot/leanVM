@@ -417,7 +417,6 @@ pub fn verify_poseidon_gkr(
             let n_coeffs = degree + 1;
             let coeffs = verifier_state.next_extension_scalars_vec(n_coeffs)?;
 
-            // p(0) + p(1) == claimed
             let p0 = coeffs[0];
             let p1: EF = coeffs.iter().copied().sum();
             if p0 + p1 != claimed {
@@ -426,7 +425,6 @@ pub fn verify_poseidon_gkr(
 
             let r_v: EF = verifier_state.sample();
             challenges.push(r_v);
-            // Evaluate polynomial at r_v using Horner's method
             claimed = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
         }
 

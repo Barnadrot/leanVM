@@ -474,7 +474,7 @@ pub fn prove_execution(
             let input_cols: Vec<&[F]> = (0..16)
                 .map(|k| pos_trace.columns[POSEIDON_COL_INPUT_START + k].as_slice())
                 .collect();
-            let col_evals = &table_col_evals[&poseidon_table];
+            let _col_evals = &table_col_evals[&poseidon_table];
 
             let (gkr_final_point, gkr_final_input_evals) =
                 sub_protocols::poseidon_gkr::prove_poseidon_gkr(

@@ -179,12 +179,12 @@ pub fn verify_execution(
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
         let n_mem_groups = total_memory_binding_groups();
-        let memory_size = 1usize << log_memory;
+        let _memory_size = 1usize << log_memory;
 
         // --- V-4: Memory-bound value columns (combined GKR-product sumcheck) ---
         let mem_stmt = if n_mem_groups > 0 {
             verifier_state.duplex();
-            let c_bind: EF = verifier_state.sample();
+            let _c_bind: EF = verifier_state.sample();
             verifier_state.duplex();
             let gamma: EF = verifier_state.sample();
             verifier_state.duplex();

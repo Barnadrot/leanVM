@@ -478,14 +478,8 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             (MAX_LOG_MEMORY_SIZE / 2).to_string(),
         );
     }
-    // Poseidon GKR constants
+    // Poseidon GKR constants for in-circuit endpoint verification
     {
-        let fmt_arr = |arr: &[F]| -> String {
-            format!("[{}]", arr.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))
-        };
-        let fmt_mat = |mat: &[[F; 16]; 16]| -> String {
-            format!("[{}]", mat.iter().map(|row| fmt_arr(row)).collect::<Vec<_>>().join(", "))
-        };
         let initial_rc = poseidon1_initial_constants();
         let final_rc = poseidon1_final_constants();
         let frc = poseidon1_sparse_first_round_constants();
@@ -493,38 +487,42 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
         let first_rows = poseidon1_sparse_first_row();
         let v_vecs = poseidon1_sparse_v();
         let scalar_rc = poseidon1_sparse_scalar_round_constants();
+        let mds = mds_dense_16_pub();
 
-        // Compute dense MDS matrix
-        let mds: [[F; 16]; 16] = {
-            let mut mat = [[F::ZERO; 16]; 16];
-            for j in 0..16 {
-                let mut e = [F::ZERO; 16];
-                e[j] = F::ONE;
-                mds_circ_16(&mut e);
-                for i in 0..16 { mat[i][j] = e[i]; }
-            }
-            mat
-        };
+        let f_to_s = |f: F| (f.as_canonical_u64() as u32).to_string();
 
-        let mds_flat: Vec<F> = mds.iter().flat_map(|r| r.iter().copied()).collect();
-        replacements.insert("POSEIDON_MDS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&mds_flat));
-        let m_i_flat: Vec<F> = m_i.iter().flat_map(|r| r.iter().copied()).collect();
-        replacements.insert("POSEIDON_M_I_FLAT_PLACEHOLDER".to_string(), fmt_arr(&m_i_flat));
-        // Flatten round constants: POSEIDON_INITIAL_RC_0 = [16 values], etc.
-        for (i, rc) in initial_rc.iter().enumerate() {
-            replacements.insert(format!("POSEIDON_INITIAL_RC_{i}_PLACEHOLDER"), fmt_arr(rc));
-        }
-        for (i, rc) in final_rc.iter().enumerate() {
-            replacements.insert(format!("POSEIDON_FINAL_RC_{i}_PLACEHOLDER"), fmt_arr(rc));
-        }
-        replacements.insert("POSEIDON_FRC_PLACEHOLDER".to_string(), fmt_arr(frc));
-        // Flatten first_rows and v_vecs into 1D arrays (20 rounds × 16 elements)
-        let first_rows_flat: Vec<F> = first_rows.iter().flat_map(|r| r.iter().copied()).collect();
-        replacements.insert("POSEIDON_FIRST_ROWS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&first_rows_flat));
-        let v_vecs_flat: Vec<F> = v_vecs.iter().flat_map(|v| v.iter().copied()).collect();
-        replacements.insert("POSEIDON_V_VECS_FLAT_PLACEHOLDER".to_string(), fmt_arr(&v_vecs_flat));
-        replacements.insert("POSEIDON_SCALAR_RC_PLACEHOLDER".to_string(),
-            format!("[{}]", scalar_rc.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")));
+        // Full round constants: initial_rc[0..4] and final_rc[0..2], each 16 elements, flattened
+        // initial_rc: 4 rounds * 16 = 64 elements
+        let initial_flat: Vec<String> = initial_rc.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_INITIAL_RC_FLAT_PLACEHOLDER".to_string(), format!("[{}]", initial_flat.join(", ")));
+
+        // final_rc: 4 rounds * 16 = 64 elements
+        let final_flat: Vec<String> = final_rc.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_FINAL_RC_FLAT_PLACEHOLDER".to_string(), format!("[{}]", final_flat.join(", ")));
+
+        // frc: 16 elements
+        let frc_flat: Vec<String> = frc.iter().map(|f| f_to_s(*f)).collect();
+        replacements.insert("POS_FRC_PLACEHOLDER".to_string(), format!("[{}]", frc_flat.join(", ")));
+
+        // m_i: 16x16 = 256 elements (row-major)
+        let m_i_flat: Vec<String> = m_i.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_M_I_FLAT_PLACEHOLDER".to_string(), format!("[{}]", m_i_flat.join(", ")));
+
+        // scalar_rc: 20 elements (partial round scalar round constants, only element 0)
+        let scalar_rc_flat: Vec<String> = scalar_rc.iter().map(|f| f_to_s(*f)).collect();
+        replacements.insert("POS_SCALAR_RC_PLACEHOLDER".to_string(), format!("[{}]", scalar_rc_flat.join(", ")));
+
+        // first_rows: 20 rounds * 16 = 320 elements (first row of sparse MDS for each partial round)
+        let first_rows_flat: Vec<String> = first_rows.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_FIRST_ROWS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", first_rows_flat.join(", ")));
+
+        // v_vecs: 20 rounds * 16 = 320 elements (v vector for sparse MDS, but only elements 1..16 are used)
+        let v_vecs_flat: Vec<String> = v_vecs.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_V_VECS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", v_vecs_flat.join(", ")));
+
+        // MDS dense matrix: 16x16 = 256 elements (row-major)
+        let mds_flat: Vec<String> = mds.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_MDS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", mds_flat.join(", ")));
     }
     replacements.insert("STARTING_PC_PLACEHOLDER".to_string(), STARTING_PC.to_string());
     replacements.insert("ENDING_PC_PLACEHOLDER".to_string(), ending_pc.to_string());
