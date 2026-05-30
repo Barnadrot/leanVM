@@ -367,7 +367,15 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
                     .reduce(|| [PEF::default(); 5], |mut a, b| { for p in 0..n_evals { a[p] += b[p]; } a });
                 (0..n_evals).map(|p| hsum_pef(packed_sums[p])).collect()
             } else {
-                vec![EF::ZERO; n_evals] // fallback for tiny sizes
+                // Scalar fallback for small tables
+                let mut evals = vec![EF::ZERO; n_evals];
+                for h in 0..half {
+                    let a: [EF; WIDTH] = std::array::from_fn(|k| EF::from(prev[2*h][k]));
+                    let b: [EF; WIDTH] = std::array::from_fn(|k| EF::from(prev[2*h+1][k]));
+                    let contrib = row_pair_contributions(&a, &b, eq_table[2*h], eq_table[2*h+1], &eq_p_el, t, n_evals, &c);
+                    for point in 0..n_evals { evals[point] += contrib[point]; }
+                }
+                evals
             };
             let p_at_1 = current_claim - raw_evals[0];
             raw_evals.insert(1, p_at_1);
