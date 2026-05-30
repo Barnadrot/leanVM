@@ -1,6 +1,7 @@
 use backend::*;
 use lean_vm::*;
 use std::{array, collections::BTreeMap};
+use sub_protocols;
 use utils::{ToUsize, get_poseidon_16_of_zero, transposed_par_iter_mut};
 
 #[derive(Debug)]
@@ -8,6 +9,8 @@ pub struct ExecutionTrace {
     pub traces: BTreeMap<Table, TableTrace>,
     pub memory: Vec<F>, // of length a multiple of public_memory_size
     pub metadata: ExecutionMetadata,
+    /// Pre-computed Poseidon GKR checkpoints (computed during trace gen to avoid redundant work)
+    pub poseidon_checkpoints: Option<Vec<Vec<[F; 16]>>>,
 }
 
 pub fn get_execution_trace(
@@ -171,10 +174,22 @@ pub fn get_execution_trace(
         );
     }
 
+    // Pre-compute Poseidon GKR checkpoints from the trace's input columns
+    let poseidon_checkpoints = {
+        let pos_table = Table::poseidon16();
+        let pos_trace = &traces[&pos_table];
+        let n_rows = 1 << pos_trace.log_n_rows;
+        let input_cols: Vec<&[F]> = (0..16)
+            .map(|k| pos_trace.columns[POSEIDON_COL_INPUT_START + k].as_slice())
+            .collect();
+        Some(sub_protocols::poseidon_gkr::compute_checkpoints_from_inputs(&input_cols, n_rows))
+    };
+
     ExecutionTrace {
         traces,
         memory: memory_padded,
         metadata: execution_result.metadata,
+        poseidon_checkpoints,
     }
 }
 

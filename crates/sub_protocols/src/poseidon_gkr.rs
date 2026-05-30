@@ -53,6 +53,10 @@ fn hsum_pef(p: PEF) -> EF {
     sum
 }
 
+pub fn compute_checkpoints_from_inputs(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec<[F; WIDTH]>> {
+    compute_checkpoint_states_base(input_cols, n_rows)
+}
+
 fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec<[F; WIDTH]>> {
     let c = poseidon_constants();
     let mut checkpoints: Vec<Vec<[F; WIDTH]>> = (0..N_TRANSITIONS + 1)
@@ -265,8 +269,12 @@ fn build_bare_from_coeffs(c0_raw: EF, c2_raw: EF, eq_alpha: EF, sum: EF, mmf: EF
 }
 
 pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[F]], n_rows: usize, log_n_rows: usize) -> (MultilinearPoint<EF>, Vec<EF>) {
+    prove_poseidon_gkr_precomputed(prover_state, input_cols, n_rows, log_n_rows, None)
+}
+
+pub fn prove_poseidon_gkr_precomputed(prover_state: &mut impl FSProver<EF>, input_cols: &[&[F]], n_rows: usize, log_n_rows: usize, precomputed_checkpoints: Option<Vec<Vec<[F; WIDTH]>>>) -> (MultilinearPoint<EF>, Vec<EF>) {
     let c = poseidon_constants();
-    let checkpoints = compute_checkpoint_states_base(input_cols, n_rows);
+    let checkpoints = precomputed_checkpoints.unwrap_or_else(|| compute_checkpoint_states_base(input_cols, n_rows));
 
     prover_state.duplex();
     let p_el: Vec<EF> = prover_state.sample_vec(4);

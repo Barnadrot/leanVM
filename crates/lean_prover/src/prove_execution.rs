@@ -29,6 +29,7 @@ pub fn prove_execution(
         traces,
         mut memory,
         metadata,
+        poseidon_checkpoints,
     } = info_span!("Witness generation").in_scope(|| -> Result<_, ProverError> {
         let execution_result = info_span!("Executing bytecode")
             .in_scope(|| try_execute_bytecode(bytecode, public_input, witness, vm_profiler))?;
@@ -477,11 +478,12 @@ pub fn prove_execution(
 
             let t_gkr = std::time::Instant::now();
             let (gkr_final_point, gkr_final_input_evals) =
-                sub_protocols::poseidon_gkr::prove_poseidon_gkr(
+                sub_protocols::poseidon_gkr::prove_poseidon_gkr_precomputed(
                     &mut prover_state,
                     &input_cols,
                     pos_n_rows,
                     pos_log_n,
+                    poseidon_checkpoints,
                 );
             eprintln!("    GKR prove: {:.0}ms", t_gkr.elapsed().as_secs_f64() * 1000.0);
 
