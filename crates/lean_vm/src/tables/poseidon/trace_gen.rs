@@ -45,22 +45,17 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
     let inputs: [F; WIDTH] = std::array::from_fn(|i| *perm.inputs[i]);
     let mut state = inputs;
 
-    // No initial linear layer for Poseidon1 (unlike Poseidon2)
-
-    for (full_round, constants) in perm
-        .beginning_full_rounds
-        .iter_mut()
-        .zip(poseidon1_initial_constants().chunks_exact(2))
-    {
-        generate_2_full_round(&mut state, full_round, &constants[0], &constants[1]);
+    // Beginning full rounds — state computed but intermediates NOT written (GKR-verified)
+    for constants in poseidon1_initial_constants().chunks_exact(2) {
+        for (s, &c) in state.iter_mut().zip(constants[0].iter()) { *s += c; *s = s.cube(); }
+        mds_circ_16(&mut state);
+        for (s, &c) in state.iter_mut().zip(constants[1].iter()) { *s += c; *s = s.cube(); }
+        mds_circ_16(&mut state);
     }
 
-    // --- Sparse partial rounds ---
-    // Transition: add first-round constants, multiply by m_i
+    // Sparse partial rounds — intermediates NOT written (GKR-verified)
     let frc = poseidon1_sparse_first_round_constants();
-    for (s, &c) in state.iter_mut().zip(frc.iter()) {
-        *s += c;
-    }
+    for (s, &c) in state.iter_mut().zip(frc.iter()) { *s += c; }
     let m_i = poseidon1_sparse_m_i();
     let input_for_mi = state;
     for i in 0..WIDTH {
@@ -73,30 +68,25 @@ pub(super) fn generate_trace_rows_for_perm<F: Algebra<KoalaBear> + Copy>(perm: &
     let scalar_rc = poseidon1_sparse_scalar_round_constants();
     let n_partial = perm.partial_rounds.len();
     for round in 0..n_partial {
-        // S-box on state[0]
         state[0] = state[0].cube();
-        *perm.partial_rounds[round] = state[0];
-        // Scalar round constant (not on last round)
-        if round < n_partial - 1 {
-            state[0] += scalar_rc[round];
-        }
-        // Sparse matrix
+        if round < n_partial - 1 { state[0] += scalar_rc[round]; }
         let old_s0 = state[0];
         let row: [F; WIDTH] = first_rows[round].map(F::from);
-        let new_s0 = F::dot_product(&state, &row);
-        state[0] = new_s0;
-        for i in 1..WIDTH {
-            state[i] += old_s0 * v_vecs[round][i - 1];
-        }
+        state[0] = F::dot_product(&state, &row);
+        for i in 1..WIDTH { state[i] += old_s0 * v_vecs[round][i - 1]; }
     }
 
-    // All ending full round pairs — each pair is a GKR-verified checkpoint
-    for (full_round, constants) in perm
-        .ending_full_rounds
-        .iter_mut()
-        .zip(poseidon1_final_constants().chunks_exact(2))
-    {
-        generate_2_full_round(&mut state, full_round, &constants[0], &constants[1]);
+    // Ending full rounds — only write LAST pair (used by AIR compression check)
+    let final_consts = poseidon1_final_constants();
+    let n_ending_pairs = perm.ending_full_rounds.len();
+    for (pair_idx, constants) in final_consts.chunks_exact(2).enumerate() {
+        for (s, &c) in state.iter_mut().zip(constants[0].iter()) { *s += c; *s = s.cube(); }
+        mds_circ_16(&mut state);
+        for (s, &c) in state.iter_mut().zip(constants[1].iter()) { *s += c; *s = s.cube(); }
+        mds_circ_16(&mut state);
+        if pair_idx == n_ending_pairs - 1 {
+            for k in 0..WIDTH { *perm.ending_full_rounds[pair_idx][k] = state[k]; }
+        }
     }
 
     // Output compression from the GKR-verified final state (same logic as generate_last_2_full_rounds)
