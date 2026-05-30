@@ -255,7 +255,6 @@ fn packed_row_pairs_pef(folded_prev: &[[EF; WIDTH]], eq_table: &[EF], pre: &Tran
         a_p[k] = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| folded_prev[2 * (start + i)][k]));
         d_p[k] = PEF::from_ext_slice(&std::array::from_fn::<EF, PACK_WIDTH, _>(|i| folded_prev[2 * (start + i) + 1][k])) - a_p[k];
     }
-    let eq_el = &pre.eq_el;
     let mut result = [PEF::default(); 5];
     if (5..=24).contains(&t) {
         let r = t - 5;
