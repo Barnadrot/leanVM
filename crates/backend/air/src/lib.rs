@@ -42,6 +42,15 @@ pub trait Air: Send + Sync + 'static {
         vec![]
     }
 
+    /// Columns bound by an external computation GKR (e.g., Poseidon layered-circuit GKR).
+    /// These columns are NOT committed in the stacked PCS but ARE sound because
+    /// their evaluations are verified by the GKR's sumcheck chain reducing from
+    /// committed outputs to committed inputs.
+    /// Returns the range(s) of computation-bound column indices.
+    fn computation_bound_columns(&self) -> Vec<std::ops::Range<usize>> {
+        vec![]
+    }
+
     /// If the AIR contains a `low_degree_block` sub-region, returns `(degree, n_constraints)`
     fn low_degree_air(&self) -> Option<(usize, usize)> {
         None

@@ -102,6 +102,9 @@ impl Air for Table {
     fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
         delegate_to_inner!(self, memory_bound_columns)
     }
+    fn computation_bound_columns(&self) -> Vec<std::ops::Range<usize>> {
+        delegate_to_inner!(self, computation_bound_columns)
+    }
     fn n_constraints(&self) -> usize {
         delegate_to_inner!(self, n_constraints)
     }
@@ -224,6 +227,56 @@ mod tests {
                 table.name(),
                 n_shift,
                 n_committed,
+            );
+        }
+    }
+
+    /// Soundness invariant: every non-committed column must be bound by a
+    /// verification protocol (memory binding, bytecode binding, or computation GKR).
+    /// A column with no binding is a free variable at the AIR sumcheck's oracle
+    /// check, allowing a malicious prover to satisfy the batched constraint
+    /// equation with fake evaluations.
+    #[test]
+    fn zero_free_variables_at_air_oracle_check() {
+        for table in ALL_TABLES {
+            let n_cols = table.n_columns();
+            let n_committed = table.n_committed_columns();
+
+            let mem_bound: std::collections::HashSet<usize> = table
+                .memory_bound_columns()
+                .iter()
+                .flat_map(|(_, range)| range.clone())
+                .collect();
+
+            let bc_bound: std::collections::HashSet<usize> = table
+                .bytecode_bound_columns()
+                .map(|range| range.collect())
+                .unwrap_or_default();
+
+            let comp_bound: std::collections::HashSet<usize> = table
+                .computation_bound_columns()
+                .iter()
+                .flat_map(|range| range.clone())
+                .collect();
+
+            let mut free_cols = Vec::new();
+            for col in 0..n_cols {
+                if col < n_committed { continue; }
+                if mem_bound.contains(&col) { continue; }
+                if bc_bound.contains(&col) { continue; }
+                if comp_bound.contains(&col) { continue; }
+                free_cols.push(col);
+            }
+
+            assert!(
+                free_cols.is_empty(),
+                "SOUNDNESS: table {}: columns {:?} are free variables at the AIR \
+                 sumcheck oracle check. Each non-committed column must be bound by \
+                 a verification protocol (memory_bound_columns, bytecode_bound_columns, \
+                 or computation_bound_columns). Free variables allow a malicious prover \
+                 to satisfy the batched constraint equation with fake evaluations.",
+                table.name(),
+                free_cols,
             );
         }
     }

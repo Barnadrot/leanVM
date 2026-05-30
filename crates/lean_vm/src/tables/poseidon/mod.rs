@@ -310,6 +310,10 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
             (POSEIDON_COL_NU_C, POSEIDON_COL_OUT_LO..POSEIDON_COL_OUT_LO + DIGEST_LEN * 2),
         ]
     }
+    fn computation_bound_columns(&self) -> Vec<std::ops::Range<usize>> {
+        let intermediates_start = POSEIDON_COL_OUT_HI + WIDTH / 2;
+        vec![intermediates_start..num_cols_poseidon_16()]
+    }
     fn degree_air(&self) -> usize {
         // Last 4 output constraints (i in 4..8) are gated by the single linear factor
         // `(1 - flag_permute - flag_short)`, which is boolean thanks to the mutex
