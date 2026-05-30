@@ -429,11 +429,10 @@ pub fn prove_poseidon_gkr(prover_state: &mut impl FSProver<EF>, input_cols: &[&[
             current_claim = coeffs.iter().rev().fold(EF::ZERO, |acc, &c| acc * r_v + c);
         }
 
-        // Remaining rounds (v=1..): folded_prev is EF
+        // Fold from F to EF: a + (b-a)*r₀ — only 1 F×EF mul per element (not 2 EF muls)
+        let r0 = challenges[0];
         let mut folded_prev: Vec<[EF; WIDTH]> = prev.par_chunks_exact(2).map(|pair| {
-            let r_v = challenges[0];
-            let one_minus_r = EF::ONE - r_v;
-            std::array::from_fn(|k| EF::from(pair[0][k]) * one_minus_r + EF::from(pair[1][k]) * r_v)
+            std::array::from_fn(|k| EF::from(pair[0][k]) + EF::from(pair[1][k] - pair[0][k]) * r0)
         }).collect();
 
         let pre = TransitionPrecomp::new(&eq_p_el, t, &c);
