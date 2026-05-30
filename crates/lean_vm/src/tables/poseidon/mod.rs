@@ -318,14 +318,15 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         3
     }
     fn low_degree_air(&self) -> Option<(usize, usize)> {
-        None // No low-degree split needed — all constraints are low degree
+        // Last 16 constraints (compression via assert_eq_low) are degree 2
+        Some((2, 2 * (WIDTH / 2)))
     }
     fn n_shift_columns(&self) -> usize {
         0
     }
     fn n_constraints(&self) -> usize {
-        // Bus: 2, bool checks: 4, flag mutual exclusion: 1, addr checks: 2, compression: 3*8=24
-        2 * BUS as usize + 4 + 1 + 2 + 3 * (WIDTH / 2)
+        // Bus: 2, bool checks: 4, flag mutual exclusion: 1, addr checks: 2, compression: 2*8=16
+        2 * BUS as usize + 4 + 1 + 2 + 2 * (WIDTH / 2)
     }
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
         let cols: Poseidon1Cols16<AB::IF> = {
@@ -398,23 +399,24 @@ pub(super) struct Poseidon1Cols16<T> {
 }
 
 fn eval_poseidon1_16<AB: AirBuilder>(builder: &mut AB, local: &Poseidon1Cols16<AB::IF>) {
-    // All intermediate transition constraints are verified by the Poseidon GKR.
-    // The AIR only verifies the output compression (using the GKR-verified final state)
-    // and bus/flag constraints.
+    // All intermediate transition constraints verified by the Poseidon GKR.
+    // Only output compression remains (low degree).
     let final_state = &local.ending_full_rounds[HALF_FINAL_FULL_ROUNDS - 1];
-
     let not_permute = AB::IF::ONE - local.flag_permute;
     let compression_last4 = not_permute - local.flag_short;
-    for i in 0..(WIDTH / 2) {
-        let compression_gate = if i < HALF_DIGEST_LEN {
-            not_permute
-        } else {
-            compression_last4
-        };
-        builder.assert_zero(compression_gate * (final_state[i] + local.inputs[i] - local.out_lo[i]));
-        builder.assert_zero(local.flag_permute * (final_state[i] - local.out_lo[i]));
-        builder.assert_zero(local.flag_permute * (final_state[i + WIDTH / 2] - local.out_hi[i]));
-    }
+
+    // Use low_degree_block for the compression constraints
+    let mut dummy_state = [local.out_lo[0]; 1]; // dummy state for the block API
+    builder.low_degree_block(&mut dummy_state, |b, _state| {
+        for i in 0..(WIDTH / 2) {
+            let compression_gate = if i < HALF_DIGEST_LEN { not_permute } else { compression_last4 };
+            b.assert_eq_low(
+                compression_gate * (final_state[i] + local.inputs[i]) + local.flag_permute * final_state[i],
+                (compression_gate + local.flag_permute) * local.out_lo[i],
+            );
+            b.assert_eq_low(local.flag_permute * final_state[i + WIDTH / 2], local.flag_permute * local.out_hi[i]);
+        }
+    });
 }
 
 pub const fn num_cols_poseidon_16() -> usize {
