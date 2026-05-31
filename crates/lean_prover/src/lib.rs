@@ -22,7 +22,7 @@ use trace_gen::*;
 pub const SECURITY_BITS: usize = 124; // TODO 128 bits security
 
 pub const GRINDING_BITS: usize = 0;
-pub const MAX_NUM_VARIABLES_TO_SEND_COEFFS: usize = 8;
+pub const MAX_NUM_VARIABLES_TO_SEND_COEFFS: usize = 9;
 pub const WHIR_INITIAL_FOLDING_FACTOR: usize = 8;
 pub const WHIR_SUBSEQUENT_FOLDING_FACTOR: usize = 6;
 pub const RS_DOMAIN_INITIAL_REDUCTION_FACTOR: usize = 6;
