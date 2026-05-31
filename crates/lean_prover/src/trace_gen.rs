@@ -1,7 +1,6 @@
 use backend::*;
 use lean_vm::*;
 use std::{array, collections::BTreeMap};
-use sub_protocols;
 use utils::{ToUsize, get_poseidon_16_of_zero, transposed_par_iter_mut};
 
 #[derive(Debug)]
