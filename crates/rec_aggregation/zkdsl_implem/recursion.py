@@ -562,7 +562,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     copy_5(bc_balance, bc_expected_balance)
     fs = fs_duplex(fs)
 
-    # Phase 3: Poseidon GKR — 27 transitions (single rounds, max degree 4)
+    # Phase 3: Poseidon GKR — 29 transitions with SplitEq (bare degree 3)
     POSEIDON_TABLE_INDEX = 2
     poseidon_log_n = table_log_heights[POSEIDON_TABLE_INDEX]
     fs = fs_duplex(fs)

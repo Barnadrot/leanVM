@@ -504,8 +504,13 @@ pub fn prove_execution(
                 );
             eprintln!("    GKR prove: {:.0}ms", t_gkr.elapsed().as_secs_f64() * 1000.0);
 
-            // Input columns are COMMITTED (N_COMMITTED=25) — GKR endpoint claims disabled for now
-            let _ = (gkr_final_point, gkr_final_input_evals);
+            // Anchor GKR endpoint: add input evaluations at gkr_point as WHIR claims
+            let gkr_input_claim: BTreeMap<ColIndex, EF> = (0..16)
+                .map(|k| (POSEIDON_COL_INPUT_START + k, gkr_final_input_evals[k]))
+                .collect();
+            committed_statements.get_mut(&poseidon_table).unwrap().push(
+                (gkr_final_point, gkr_input_claim, BTreeMap::new())
+            );
             prover_state.duplex();
         }
 
