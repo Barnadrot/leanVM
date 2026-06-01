@@ -280,8 +280,13 @@ pub fn verify_execution(
                     &mut verifier_state, pos_log_n,
                 )?;
 
-            // Input columns are COMMITTED (N_COMMITTED=25) — GKR endpoint claims disabled
-            let _ = (gkr_point, gkr_input_evals);
+            // Anchor GKR endpoint: verify input evaluations at gkr_point via WHIR
+            let gkr_input_claim: BTreeMap<ColIndex, EF> = (0..16)
+                .map(|k| (POSEIDON_COL_INPUT_START + k, gkr_input_evals[k]))
+                .collect();
+            committed_statements.get_mut(&poseidon_table).unwrap().push(
+                (gkr_point, gkr_input_claim, BTreeMap::new())
+            );
             verifier_state.duplex();
         }
 
