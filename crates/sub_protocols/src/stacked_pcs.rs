@@ -241,5 +241,5 @@ pub fn total_whir_statements() -> usize {
         })
         .sum::<usize>()
         + 1 // PC (bytecode-bound)
-        + 16 // Poseidon GKR endpoint input evaluations (anchored at gkr_point)
+        // TODO: + 16 for Poseidon GKR endpoint (Finding 1) — needs recursion circuit support
 }

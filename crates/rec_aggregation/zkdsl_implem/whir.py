@@ -287,6 +287,12 @@ def decompose_and_verify_merkle_batch_with_height(
     if num_chunks == 64:
         decompose_and_verify_merkle_batch_const(num_queries, sampled, root, height, 64, circle_values, answers)
         return
+    if num_chunks == 128:
+        decompose_and_verify_merkle_batch_const(num_queries, sampled, root, height, 128, circle_values, answers)
+        return
+    if num_chunks == 256:
+        decompose_and_verify_merkle_batch_const(num_queries, sampled, root, height, 256, circle_values, answers)
+        return
     print(num_chunks)
     assert False, "decompose_and_verify_merkle_batch called with unsupported num_chunks"
 
