@@ -8,8 +8,6 @@ pub struct ExecutionTrace {
     pub traces: BTreeMap<Table, TableTrace>,
     pub memory: Vec<F>, // of length a multiple of public_memory_size
     pub metadata: ExecutionMetadata,
-    /// Pre-computed Poseidon GKR checkpoints (computed during trace gen to avoid redundant work)
-    pub poseidon_checkpoints: Option<Vec<Vec<[F; 16]>>>,
 }
 
 pub fn get_execution_trace(
@@ -177,7 +175,6 @@ pub fn get_execution_trace(
         traces,
         memory: memory_padded,
         metadata: execution_result.metadata,
-        poseidon_checkpoints: None, // computed lazily during proving
     }
 }
 

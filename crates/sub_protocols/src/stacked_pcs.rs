@@ -241,5 +241,4 @@ pub fn total_whir_statements() -> usize {
         })
         .sum::<usize>()
         + 1 // PC (bytecode-bound)
-        + 16 // Poseidon GKR endpoint input evaluations (anchored at gkr_point)
 }
