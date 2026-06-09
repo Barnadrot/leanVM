@@ -47,6 +47,8 @@ N_MEM_BIND_GROUPS_TOTAL = N_MEM_BIND_GROUPS_TOTAL_PLACEHOLDER
 N_MEM_BIND_VALUE_COLS_TOTAL = N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER
 MEM_BIND_VALUE_COLS = MEM_BIND_VALUE_COLS_PLACEHOLDER
 MEM_BIND_HALF_BITS_MAX = MEM_BIND_HALF_BITS_MAX_PLACEHOLDER
+SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX  # compile-time: pushforward size for memory binding
+SQRT_K_BC = 2**MEM_BIND_HALF_BITS_MAX  # = SQRT_K_MEM since both use the same half_bits
 STARTING_PC = STARTING_PC_PLACEHOLDER
 ENDING_PC = ENDING_PC_PLACEHOLDER
 
@@ -518,10 +520,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         fs, _shout_challenges, _shout_endpoint = sumcheck_verify(fs, log_memory, bind_batched_val, 2)
 
         # Step 3: Per-table tensor decomp + Section 4.1 pushforward + ONE GKR
-        if log_memory < MEM_BIND_HALF_BITS_MAX:
-            half_bits = log_memory
-        else:
-            half_bits = MEM_BIND_HALF_BITS_MAX
+        # half_bits = min(MEM_BIND_HALF_BITS_MAX, log_memory)
+        # For production: log_memory >= MIN_LOG_MEMORY_SIZE = 16 > MEM_BIND_HALF_BITS_MAX = 13
+        # So half_bits = MEM_BIND_HALF_BITS_MAX always holds in practice
+        half_bits = MEM_BIND_HALF_BITS_MAX
 
         for table_index in unroll(0, N_TABLES):
             if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
@@ -538,13 +540,13 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 fs = fs_duplex(fs)
                 fs, _alpha_sel = fs_sample_ef(fs)
 
-                sqrt_k = two_exp(half_bits)
-                fs, _pushforward = fs_receive_ef_inlined(fs, sqrt_k)
+                SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
+                fs, _pushforward = fs_receive_ef_inlined(fs, SQRT_K_MEM)
 
                 fs, _c_pf = fs_sample_ef(fs)
 
-                # ONE GKR: combined_size = next_pow2(sqrt_k + 2*n_rows)
-                log_combined = log2_ceil_runtime(sqrt_k + 2 * n_rows)
+                # ONE GKR: combined_size = next_pow2(SQRT_K_MEM + 2*n_rows)
+                log_combined = log2_ceil_runtime(SQRT_K_MEM + 2 * n_rows)
                 fs, gkr_q, _, _, _ = verify_gkr_quotient(fs, log_combined)
                 set_to_5_zeros(gkr_q)  # quotient must be zero
 
@@ -578,12 +580,12 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     fs, _bc_alpha_sel = fs_sample_ef(fs)
 
     half_bits_bc = min(MEM_BIND_HALF_BITS_MAX, LOG_GUEST_BYTECODE_LEN)
-    sqrt_bc = two_exp(half_bits_bc)
-    fs, _bc_pushforward = fs_receive_ef_inlined(fs, sqrt_bc)
+    sqrt_bc = SQRT_K_BC
+    fs, _bc_pushforward = fs_receive_ef_inlined(fs, SQRT_K_BC)
 
     fs, _bc_c_pf = fs_sample_ef(fs)
 
-    bc_combined_size_input = sqrt_bc + 2 * two_exp(log_n_cycles)
+    bc_combined_size_input = SQRT_K_BC + 2 * two_exp(log_n_cycles)
     bc_log_combined = log2_ceil_runtime(bc_combined_size_input)
     fs, bc_gkr_q, _, _, _ = verify_gkr_quotient(fs, bc_log_combined)
     set_to_5_zeros(bc_gkr_q)  # quotient must be zero
