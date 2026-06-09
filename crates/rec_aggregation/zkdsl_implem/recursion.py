@@ -49,6 +49,7 @@ MEM_BIND_VALUE_COLS = MEM_BIND_VALUE_COLS_PLACEHOLDER
 MEM_BIND_HALF_BITS_MAX = MEM_BIND_HALF_BITS_MAX_PLACEHOLDER
 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX  # compile-time: pushforward size for memory binding
 SQRT_K_BC = 2**MEM_BIND_HALF_BITS_MAX
+PF_N_CHUNKS = div_ceil(SQRT_K_MEM * DIM, DIGEST_LEN)  # compile-time: 5120
 STARTING_PC = STARTING_PC_PLACEHOLDER
 ENDING_PC = ENDING_PC_PLACEHOLDER
 
@@ -543,7 +544,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
                 # Receive pushforward via runtime absorb (avoids compile-time unroll)
                 sqrt_k_runtime = two_exp(half_bits)
-                fs, _pushforward = fs_receive_ef_runtime(fs, sqrt_k_runtime)
+                fs, _pushforward = fs_receive_ef_runtime(fs, sqrt_k_runtime, PF_N_CHUNKS)
 
                 fs, _c_pf = fs_sample_ef(fs)
 
@@ -585,7 +586,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     sqrt_bc = SQRT_K_BC
     # Receive bytecode pushforward via runtime absorb
     sqrt_bc_runtime = two_exp(half_bits_bc)
-    fs, _bc_pushforward = fs_receive_ef_runtime(fs, sqrt_bc_runtime)
+    fs, _bc_pushforward = fs_receive_ef_runtime(fs, sqrt_bc_runtime, PF_N_CHUNKS)
 
     fs, _bc_c_pf = fs_sample_ef(fs)
 

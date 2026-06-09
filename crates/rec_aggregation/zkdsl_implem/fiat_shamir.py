@@ -39,10 +39,18 @@ def _absorb_chunks_runtime(fs, data, n_chunks, new_transcript_ptr):
     return chain + (n_chunks - 1) * 16
 
 
-def fs_receive_ef_runtime(fs, n):
-    n_chunks = div_ceil(n * DIM, DIGEST_LEN)
+def fs_receive_ef_runtime(fs, n_ef_elements, n_chunks: Const):
+    # Absorb n_ef_elements EF elements from transcript.
+    # n_chunks = div_ceil(n_ef_elements * DIM, DIGEST_LEN) (precomputed, Const).
+    # We compute a RUNTIME n_chunks_rt from n_ef_elements to prevent
+    # the compiler from unrolling the range loop.
+    # n_chunks_rt = n_ef_elements * DIM / DIGEST_LEN (exact for our sizes)
+    # since DIM=5, DIGEST_LEN=8: n_chunks = n_ef * 5 / 8
+    # For n_ef = 8192: n_chunks = 5120
+    # We multiply by 5 then divide by 8. Both are runtime-safe:
+    n_chunks_rt = n_ef_elements * DIM / DIGEST_LEN  # runtime integer division
     transcript_ptr = fs[16]
-    new_fs = _absorb_chunks_runtime(fs, transcript_ptr, n_chunks, transcript_ptr + n_chunks * DIGEST_LEN)
+    new_fs = _absorb_chunks_runtime(fs, transcript_ptr, n_chunks_rt, transcript_ptr + n_chunks_rt * DIGEST_LEN)
     return new_fs, transcript_ptr
 
 
