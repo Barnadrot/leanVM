@@ -541,11 +541,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 fs, _alpha_sel = fs_sample_ef(fs)
 
                 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
-                # Receive pushforward one element at a time (runtime loop)
-                _pushforward = Array(SQRT_K_MEM * DIM)
-                for _pf_i in range(0, SQRT_K_MEM):
-                    fs, _pf_el = fs_receive_ef_inlined(fs, 1)
-                    copy_5(_pf_el, _pushforward + _pf_i * DIM)
+                # Receive pushforward via runtime absorb (avoids compile-time unroll)
+                sqrt_k_runtime = two_exp(half_bits)
+                fs, _pushforward = fs_receive_ef_runtime(fs, sqrt_k_runtime)
 
                 fs, _c_pf = fs_sample_ef(fs)
 
@@ -585,11 +583,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
 
     half_bits_bc = min(MEM_BIND_HALF_BITS_MAX, LOG_GUEST_BYTECODE_LEN)
     sqrt_bc = SQRT_K_BC
-    # Receive bytecode pushforward one element at a time (runtime loop)
-    _bc_pushforward = Array(SQRT_K_BC * DIM)
-    for _bc_i in range(0, SQRT_K_BC):
-        fs, _bc_el = fs_receive_ef_inlined(fs, 1)
-        copy_5(_bc_el, _bc_pushforward + _bc_i * DIM)
+    # Receive bytecode pushforward via runtime absorb
+    sqrt_bc_runtime = two_exp(half_bits_bc)
+    fs, _bc_pushforward = fs_receive_ef_runtime(fs, sqrt_bc_runtime)
 
     fs, _bc_c_pf = fs_sample_ef(fs)
 

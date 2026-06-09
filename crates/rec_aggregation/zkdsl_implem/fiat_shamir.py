@@ -29,6 +29,23 @@ def _absorb_chunks(fs, data, n_chunks, new_transcript_ptr):
     return chain + (n_chunks - 1) * 16
 
 
+def _absorb_chunks_runtime(fs, data, n_chunks, new_transcript_ptr):
+    assert n_chunks != 0
+    chain = Array(n_chunks * 16 + 1)
+    poseidon16_permute(fs, data, chain)
+    for i in range(1, n_chunks):
+        poseidon16_permute(chain + (i - 1) * 16, data + i * DIGEST_LEN, chain + i * 16)
+    chain[n_chunks * 16] = new_transcript_ptr
+    return chain + (n_chunks - 1) * 16
+
+
+def fs_receive_ef_runtime(fs, n):
+    n_chunks = div_ceil(n * DIM, DIGEST_LEN)
+    transcript_ptr = fs[16]
+    new_fs = _absorb_chunks_runtime(fs, transcript_ptr, n_chunks, transcript_ptr + n_chunks * DIGEST_LEN)
+    return new_fs, transcript_ptr
+
+
 @inline
 def fs_observe_chunks(fs, data, n_chunks):
     return _absorb_chunks(fs, data, n_chunks, fs[16])
