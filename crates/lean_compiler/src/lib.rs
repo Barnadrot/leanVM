@@ -128,13 +128,21 @@ pub fn try_compile_program_with_flags(
     input: &ProgramSource,
     flags: CompilationFlags,
 ) -> Result<Bytecode, CompileError> {
+    let t0 = std::time::Instant::now();
     let parsed_program = parse_program(input, flags)?;
+    eprintln!("[compile-pipeline] parse: {:.1}s", t0.elapsed().as_secs_f64());
     let function_locations = parsed_program.function_locations.clone();
     let source_code = parsed_program.source_code.clone();
     let filepaths = parsed_program.filepaths.clone();
+    let t1 = std::time::Instant::now();
     let simple_program = simplify_program(parsed_program)?;
+    eprintln!("[compile-pipeline] simplify: {:.1}s", t1.elapsed().as_secs_f64());
+    let t2 = std::time::Instant::now();
     let intermediate_bytecode = compile_to_intermediate_bytecode(simple_program)?;
+    eprintln!("[compile-pipeline] intermediate: {:.1}s", t2.elapsed().as_secs_f64());
+    let t3 = std::time::Instant::now();
     let bytecode = compile_to_low_level_bytecode(intermediate_bytecode, function_locations, source_code, filepaths)?;
+    eprintln!("[compile-pipeline] low-level: {:.1}s", t3.elapsed().as_secs_f64());
     Ok(bytecode)
 }
 

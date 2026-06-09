@@ -448,10 +448,17 @@ fn compile_time_transform_in_lines(
     inline_counter: &mut Counter,
     parent_const_var_exprs: &BTreeMap<Var, F>,
 ) -> Result<(), String> {
+    let _t_start = std::time::Instant::now();
+    let _initial_len = lines.len();
     let mut const_var_exprs: BTreeMap<Var, F> = parent_const_var_exprs.clone(); // used to simplify expressions containing variables with known constant values
 
     let mut i = 0;
+    let mut _last_report = std::time::Instant::now();
     while i < lines.len() {
+        if _last_report.elapsed().as_secs() >= 5 {
+            eprintln!("[compiler] PROGRESS: i={}/{}, lines.len()={}", i, _initial_len, lines.len());
+            _last_report = std::time::Instant::now();
+        }
         let line = &mut lines[i];
 
         // Handle match_range expansion FIRST, before any expression transformations
@@ -619,6 +626,10 @@ fn compile_time_transform_in_lines(
         }
 
         i += 1;
+    }
+    let _elapsed = _t_start.elapsed();
+    if _elapsed.as_millis() > 500 {
+        eprintln!("[compiler] compile_time_transform: {:.1}s, lines {}->{}", _elapsed.as_secs_f64(), _initial_len, lines.len());
     }
     Ok(())
 }
