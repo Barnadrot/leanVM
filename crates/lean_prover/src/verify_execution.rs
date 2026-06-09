@@ -217,9 +217,6 @@ pub fn verify_execution(
             // Tensor decomposition per table
             let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
 
-            verifier_state.duplex();
-            let c_pf: EF = verifier_state.sample();
-
             for table in ALL_TABLES {
                 let groups = memory_binding_groups(&table);
                 if groups.is_empty() { continue; }
@@ -234,18 +231,20 @@ pub fn verify_execution(
                 )?;
                 let _row_point = td_result.1;
 
-                // Receive pushforward and verify GKR
+                // Section 4.1: receive pushforward, verify ONE GKR
                 verifier_state.duplex();
-                let _beta: EF = verifier_state.sample();
+                let _alpha_sel: EF = verifier_state.sample();
                 let sqrt_k = 1usize << half_bits;
-                let p_batched = verifier_state.next_extension_scalars_vec(sqrt_k)?;
+                let _pushforward = verifier_state.next_extension_scalars_vec(sqrt_k)?;
+                let _c_pf: EF = verifier_state.sample();
 
-                // LEFT GKR over sqrt(K)
-                let gkr_log = half_bits.max(N_VARS_TO_SEND_GKR_COEFFS + 1); let left = verify_gkr_quotient(&mut verifier_state, gkr_log)?;
-                // RIGHT GKR over T
-                let right = verify_gkr_quotient(&mut verifier_state, log_n)?;
+                // ONE stacked GKR: pushforward + trace_hi + trace_lo
+                let n_rows_table = 1usize << log_n;
+                let combined_size = (sqrt_k + 2 * n_rows_table).next_power_of_two();
+                let log_combined = log2_ceil_usize(combined_size);
+                let gkr_result = verify_gkr_quotient(&mut verifier_state, log_combined)?;
 
-                if !(left.0 + right.0).is_zero() {
+                if !gkr_result.0.is_zero() {
                     return Err(ProofError::InvalidProof);
                 }
             }
@@ -290,18 +289,18 @@ pub fn verify_execution(
                 &mut verifier_state, exec_log_n, bc_pjoint_eval,
             )?;
 
-            // d=2 pushforward + GKR for bytecode
+            // Section 4.1: receive pushforward, verify ONE GKR for bytecode
             verifier_state.duplex();
-            let _beta_bc: EF = verifier_state.sample();
+            let _bc_alpha_sel: EF = verifier_state.sample();
             let half_bits_bc = HALF_BITS_BC.min(bytecode.log_size());
             let sqrt_bc = 1usize << half_bits_bc;
-            let _p_bc_batched = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
+            let _bc_pushforward = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
+            let _bc_c_pf: EF = verifier_state.sample();
 
-            let _bc_c_pf: EF = verifier_state.sample(); // must match prover: sample BEFORE GKR
-            let gkr_log_bc = half_bits_bc.max(N_VARS_TO_SEND_GKR_COEFFS + 1);
-            let bc_left = verify_gkr_quotient(&mut verifier_state, gkr_log_bc)?;
-            let bc_right = verify_gkr_quotient(&mut verifier_state, exec_log_n)?;
-            if !(bc_left.0 + bc_right.0).is_zero() {
+            let bc_combined_size = (sqrt_bc + 2 * (1usize << exec_log_n)).next_power_of_two();
+            let bc_log_combined = log2_ceil_usize(bc_combined_size);
+            let bc_gkr = verify_gkr_quotient(&mut verifier_state, bc_log_combined)?;
+            if !bc_gkr.0.is_zero() {
                 return Err(ProofError::InvalidProof);
             }
             verifier_state.duplex();
