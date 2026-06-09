@@ -350,9 +350,7 @@ pub fn prove_execution(
             let s_hi = &s_point[half_bits..log_memory];
 
             // P_joint_tilde(s) = Σ_table table_contrib(s)
-            // For each table, prove table_contrib via tensor decomp sumcheck
-            prover_state.duplex();
-            let c_pf: EF = prover_state.sample(); // challenge for pushforward GKR
+            // For each table: tensor decomp → Section 4.1 concatenated pushforward → ONE GKR
 
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
@@ -413,54 +411,58 @@ pub fn prove_execution(
                     &mut prover_state, &mut eq_r_fold, &mut eq_hi_fold, &mut eq_lo_fold, table_contrib,
                 );
 
-                // d=2 pushforward at tensor decomp endpoint
+                // Section 4.1: Concatenated pushforward + ONE GKR
                 let eq_row_prime = eval_eq(&row_point);
                 prover_state.duplex();
-                let beta: EF = prover_state.sample();
+                let alpha_sel: EF = prover_state.sample();
+                let one_minus_alpha = EF::ONE - alpha_sel;
+
                 let addr_col = &trace.columns[groups[0].addr_col];
-                let addr_hi_vals: Vec<F> = addr_col.iter().map(|&a| F::from_usize(a.to_usize() >> half_bits)).collect();
-                let addr_lo_vals: Vec<F> = addr_col.iter().map(|&a| F::from_usize(a.to_usize() & ((1 << half_bits) - 1))).collect();
-                let (p_hi, p_lo, p_batched_pf) = shout_binding::compute_d2_pushforward(
-                    &addr_hi_vals, &addr_lo_vals, &eq_row_prime, half_bits, beta,
-                );
+                let sqrt_k = 1usize << half_bits;
 
-                // Send pushforward to transcript
-                prover_state.add_extension_scalars(&p_batched_pf);
+                // ONE pushforward: P[j] = (1-α)*P_hi[j] + α*P_lo[j]
+                let mut pushforward = EF::zero_vec(sqrt_k);
+                for (row, &eq_val) in eq_row_prime.iter().enumerate() {
+                    let addr_val = addr_col[row].to_usize();
+                    let h = addr_val >> half_bits;
+                    let l = addr_val & ((1 << half_bits) - 1);
+                    if h < sqrt_k { pushforward[h] += one_minus_alpha * eq_val; }
+                    if l < sqrt_k { pushforward[l] += alpha_sel * eq_val; }
+                }
+                prover_state.add_extension_scalars(&pushforward);
+                let c_pf: EF = prover_state.sample();
 
-                // GKR for pushforward well-formedness
-                let min_gkr_log = N_VARS_TO_SEND_GKR_COEFFS + 1;
-                let gkr_log = half_bits.max(min_gkr_log);
-                let gkr_size = 1usize << gkr_log;
+                // ONE stacked GKR: pushforward + trace_hi + trace_lo
+                let combined_size = (sqrt_k + 2 * n_rows).next_power_of_two();
+                let log_combined = log2_ceil_usize(combined_size);
 
-                // LEFT GKR: Σ_h P_batched[h]/(c_pf - h)
-                let mut left_nums = EF::zero_vec(gkr_size);
-                for (j, &p) in p_batched_pf.iter().enumerate() { left_nums[j] = -p; }
-                let left_dens: Vec<EF> = (0..gkr_size).map(|h| c_pf - EF::from_usize(h)).collect();
-                let pivot_left = ENDIANNESS_PIVOT_GKR.min(gkr_log);
-                let left_nums_packed = pack_ef(&left_nums);
-                let left_dens_packed = pack_ef(&left_dens);
-                let left_nums_br = br_packed(&left_nums_packed, pivot_left);
-                let left_dens_br = br_packed(&left_dens_packed, pivot_left);
-                let left = prove_gkr_quotient_ext(&mut prover_state, &left_nums_br, &left_dens_br, pivot_left);
+                let mut combined_nums = EF::zero_vec(combined_size);
+                let mut combined_dens = vec![EF::ONE; combined_size];
 
-                // RIGHT GKR: Σ_row eq_row_prime[row]/(c_pf - addr_hi[row]) + beta * Σ_row eq_row_prime[row]/(c_pf - addr_lo[row])
-                let right_nums: Vec<EF> = (0..n_rows).map(|i| {
-                    let den_hi = c_pf - EF::from(addr_hi_vals[i]);
-                    let den_lo = c_pf - EF::from(addr_lo_vals[i]);
-                    eq_row_prime[i] * den_lo + beta * eq_row_prime[i] * den_hi
-                }).collect();
-                let right_dens: Vec<EF> = (0..n_rows).map(|i| {
-                    (c_pf - EF::from(addr_hi_vals[i])) * (c_pf - EF::from(addr_lo_vals[i]))
-                }).collect();
-                let pivot_right = ENDIANNESS_PIVOT_GKR.min(log_n);
-                let right_nums_packed = pack_ef(&right_nums);
-                let right_dens_packed = pack_ef(&right_dens);
-                let right_nums_br = br_packed(&right_nums_packed, pivot_right);
-                let right_dens_br = br_packed(&right_dens_packed, pivot_right);
-                let _right = prove_gkr_quotient_ext(&mut prover_state, &right_nums_br, &right_dens_br, pivot_right);
+                for (j, &p) in pushforward.iter().enumerate() {
+                    combined_nums[j] = -p;
+                    combined_dens[j] = c_pf - EF::from_usize(j);
+                }
+                for i in 0..n_rows {
+                    let addr_val = addr_col[i].to_usize();
+                    combined_nums[sqrt_k + i] = eq_row_prime[i] * one_minus_alpha;
+                    combined_dens[sqrt_k + i] = c_pf - EF::from_usize(addr_val >> half_bits);
+                }
+                for i in 0..n_rows {
+                    let addr_val = addr_col[i].to_usize();
+                    combined_nums[sqrt_k + n_rows + i] = eq_row_prime[i] * alpha_sel;
+                    combined_dens[sqrt_k + n_rows + i] = c_pf - EF::from_usize(addr_val & ((1 << half_bits) - 1));
+                }
 
-                debug_assert!((left.0 + _right.0).is_zero(),
-                    "Shout pushforward GKR balance failed for table {}", table.name());
+                let pivot = ENDIANNESS_PIVOT_GKR.min(log_combined);
+                let comb_nums_packed = pack_ef(&combined_nums);
+                let comb_dens_packed = pack_ef(&combined_dens);
+                let comb_nums_br = br_packed(&comb_nums_packed, pivot);
+                let comb_dens_br = br_packed(&comb_dens_packed, pivot);
+                let gkr_result = prove_gkr_quotient_ext(&mut prover_state, &comb_nums_br, &comb_dens_br, pivot);
+
+                debug_assert!(gkr_result.0.is_zero(),
+                    "Section 4.1 ONE GKR: quotient must be zero for table {}", table.name());
             }
 
             prover_state.duplex();
@@ -542,52 +544,50 @@ pub fn prove_execution(
                 &mut prover_state, &mut eq_r_bc_fold, &mut eq_hi_bc_fold, &mut eq_lo_bc_fold, bc_pjoint_eval,
             );
 
-            // Step 5: d=2 pushforward + GKR for bytecode
+            // Section 4.1: Concatenated pushforward + ONE GKR for bytecode
             let eq_bc_row_prime = eval_eq(&bc_row_point);
             prover_state.duplex();
-            let beta_bc: EF = prover_state.sample();
-            let (p_bc_hi, p_bc_lo, p_bc_batched) = shout_binding::compute_d2_pushforward(
-                &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
-                &eq_bc_row_prime, half_bits_bc, beta_bc,
-            );
-            prover_state.add_extension_scalars(&p_bc_batched);
+            let bc_alpha_sel: EF = prover_state.sample();
+            let bc_one_minus_alpha = EF::ONE - bc_alpha_sel;
 
-
-            // GKR for bytecode pushforward well-formedness
-            let min_gkr_log = N_VARS_TO_SEND_GKR_COEFFS + 1;
-            let gkr_log_bc = half_bits_bc.max(min_gkr_log);
-            let gkr_size_bc = 1usize << gkr_log_bc;
+            let sqrt_bc = 1usize << half_bits_bc;
+            let mut bc_pushforward = EF::zero_vec(sqrt_bc);
+            for (row, &eq_val) in eq_bc_row_prime.iter().enumerate() {
+                let h = pc_hi_col[row].to_usize();
+                let l = pc_lo_col[row].to_usize();
+                if h < sqrt_bc { bc_pushforward[h] += bc_one_minus_alpha * eq_val; }
+                if l < sqrt_bc { bc_pushforward[l] += bc_alpha_sel * eq_val; }
+            }
+            prover_state.add_extension_scalars(&bc_pushforward);
             let bc_c_pf: EF = prover_state.sample();
 
-            let mut bc_left_nums = EF::zero_vec(gkr_size_bc);
-            for (j, &p) in p_bc_batched.iter().enumerate() { bc_left_nums[j] = -p; }
-            let bc_left_dens: Vec<EF> = (0..gkr_size_bc).map(|h| bc_c_pf - EF::from_usize(h)).collect();
-            let pivot_bc_left = ENDIANNESS_PIVOT_GKR.min(gkr_log_bc);
-            let bc_left_nums_packed = pack_ef(&bc_left_nums);
-            let bc_left_dens_packed = pack_ef(&bc_left_dens);
-            let bc_left_nums_br = br_packed(&bc_left_nums_packed, pivot_bc_left);
-            let bc_left_dens_br = br_packed(&bc_left_dens_packed, pivot_bc_left);
-            let bc_left = prove_gkr_quotient_ext(&mut prover_state, &bc_left_nums_br, &bc_left_dens_br, pivot_bc_left);
+            let bc_combined_size = (sqrt_bc + 2 * n_exec_rows).next_power_of_two();
+            let bc_log_combined = log2_ceil_usize(bc_combined_size);
 
-            let bc_right_nums: Vec<EF> = (0..n_exec_rows).map(|i| {
-                let den_hi = bc_c_pf - EF::from(pc_hi_col[i]);
-                let den_lo = bc_c_pf - EF::from(pc_lo_col[i]);
-                eq_bc_row_prime[i] * den_lo + beta_bc * eq_bc_row_prime[i] * den_hi
-            }).collect();
-            let bc_right_dens: Vec<EF> = (0..n_exec_rows).map(|i| {
-                (bc_c_pf - EF::from(pc_hi_col[i])) * (bc_c_pf - EF::from(pc_lo_col[i]))
-            }).collect();
-            let pivot_bc_right = ENDIANNESS_PIVOT_GKR.min(exec_log_n);
-            let bc_right_nums_packed = pack_ef(&bc_right_nums);
-            let bc_right_dens_packed = pack_ef(&bc_right_dens);
-            let bc_right_nums_br = br_packed(&bc_right_nums_packed, pivot_bc_right);
-            let bc_right_dens_br = br_packed(&bc_right_dens_packed, pivot_bc_right);
-            let bc_right = prove_gkr_quotient_ext(
-                &mut prover_state, &bc_right_nums_br, &bc_right_dens_br, pivot_bc_right,
-            );
+            let mut bc_comb_nums = EF::zero_vec(bc_combined_size);
+            let mut bc_comb_dens = vec![EF::ONE; bc_combined_size];
 
-            debug_assert!((bc_left.0 + bc_right.0).is_zero(),
-                "Shout bytecode pushforward GKR balance failed");
+            for (j, &p) in bc_pushforward.iter().enumerate() {
+                bc_comb_nums[j] = -p;
+                bc_comb_dens[j] = bc_c_pf - EF::from_usize(j);
+            }
+            for i in 0..n_exec_rows {
+                bc_comb_nums[sqrt_bc + i] = eq_bc_row_prime[i] * bc_one_minus_alpha;
+                bc_comb_dens[sqrt_bc + i] = bc_c_pf - EF::from(pc_hi_col[i]);
+            }
+            for i in 0..n_exec_rows {
+                bc_comb_nums[sqrt_bc + n_exec_rows + i] = eq_bc_row_prime[i] * bc_alpha_sel;
+                bc_comb_dens[sqrt_bc + n_exec_rows + i] = bc_c_pf - EF::from(pc_lo_col[i]);
+            }
+
+            let bc_pivot = ENDIANNESS_PIVOT_GKR.min(bc_log_combined);
+            let bc_comb_nums_packed = pack_ef(&bc_comb_nums);
+            let bc_comb_dens_packed = pack_ef(&bc_comb_dens);
+            let bc_comb_nums_br = br_packed(&bc_comb_nums_packed, bc_pivot);
+            let bc_comb_dens_br = br_packed(&bc_comb_dens_packed, bc_pivot);
+            let bc_gkr = prove_gkr_quotient_ext(&mut prover_state, &bc_comb_nums_br, &bc_comb_dens_br, bc_pivot);
+
+            debug_assert!(bc_gkr.0.is_zero(), "Section 4.1 ONE GKR: bytecode quotient must be zero");
             prover_state.duplex();
         }
 
