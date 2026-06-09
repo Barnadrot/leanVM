@@ -426,13 +426,15 @@ pub fn prove_execution(
                 prover_state.add_extension_scalars(&p_batched_pf);
 
                 // GKR for pushforward well-formedness
-                let sqrt_k = 1usize << half_bits;
-                let log_sqrt_k = half_bits;
+                let min_gkr_log = N_VARS_TO_SEND_GKR_COEFFS + 1;
+                let gkr_log = half_bits.max(min_gkr_log);
+                let gkr_size = 1usize << gkr_log;
 
                 // LEFT GKR: Σ_h P_batched[h]/(c_pf - h)
-                let left_nums: Vec<EF> = p_batched_pf.iter().map(|&p| -p).collect();
-                let left_dens: Vec<EF> = (0..sqrt_k).map(|h| c_pf - EF::from_usize(h)).collect();
-                let pivot_left = ENDIANNESS_PIVOT_GKR.min(log_sqrt_k);
+                let mut left_nums = EF::zero_vec(gkr_size);
+                for (j, &p) in p_batched_pf.iter().enumerate() { left_nums[j] = -p; }
+                let left_dens: Vec<EF> = (0..gkr_size).map(|h| c_pf - EF::from_usize(h)).collect();
+                let pivot_left = ENDIANNESS_PIVOT_GKR.min(gkr_log);
                 let left_nums_packed = pack_ef(&left_nums);
                 let left_dens_packed = pack_ef(&left_dens);
                 let left_nums_br = br_packed(&left_nums_packed, pivot_left);
@@ -549,12 +551,15 @@ pub fn prove_execution(
             prover_state.add_extension_scalars(&p_bc_batched);
 
             // GKR for bytecode pushforward well-formedness
-            let sqrt_bc = 1usize << half_bits_bc;
+            let min_gkr_log = N_VARS_TO_SEND_GKR_COEFFS + 1;
+            let gkr_log_bc = half_bits_bc.max(min_gkr_log);
+            let gkr_size_bc = 1usize << gkr_log_bc;
             let bc_c_pf: EF = prover_state.sample();
 
-            let bc_left_nums: Vec<EF> = p_bc_batched.iter().map(|&p| -p).collect();
-            let bc_left_dens: Vec<EF> = (0..sqrt_bc).map(|h| bc_c_pf - EF::from_usize(h)).collect();
-            let pivot_bc_left = ENDIANNESS_PIVOT_GKR.min(half_bits_bc);
+            let mut bc_left_nums = EF::zero_vec(gkr_size_bc);
+            for (j, &p) in p_bc_batched.iter().enumerate() { bc_left_nums[j] = -p; }
+            let bc_left_dens: Vec<EF> = (0..gkr_size_bc).map(|h| bc_c_pf - EF::from_usize(h)).collect();
+            let pivot_bc_left = ENDIANNESS_PIVOT_GKR.min(gkr_log_bc);
             let bc_left_nums_packed = pack_ef(&bc_left_nums);
             let bc_left_dens_packed = pack_ef(&bc_left_dens);
             let bc_left_nums_br = br_packed(&bc_left_nums_packed, pivot_bc_left);

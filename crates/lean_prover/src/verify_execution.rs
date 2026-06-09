@@ -241,7 +241,7 @@ pub fn verify_execution(
                 let p_batched = verifier_state.next_extension_scalars_vec(sqrt_k)?;
 
                 // LEFT GKR over sqrt(K)
-                let left = verify_gkr_quotient(&mut verifier_state, half_bits)?;
+                let gkr_log = half_bits.max(N_VARS_TO_SEND_GKR_COEFFS + 1); let left = verify_gkr_quotient(&mut verifier_state, gkr_log)?;
                 // RIGHT GKR over T
                 let right = verify_gkr_quotient(&mut verifier_state, log_n)?;
 
@@ -297,7 +297,7 @@ pub fn verify_execution(
             let sqrt_bc = 1usize << half_bits_bc;
             let _p_bc_batched = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
 
-            let bc_left = verify_gkr_quotient(&mut verifier_state, half_bits_bc)?;
+            let gkr_log_bc = half_bits_bc.max(N_VARS_TO_SEND_GKR_COEFFS + 1); let bc_left = verify_gkr_quotient(&mut verifier_state, gkr_log_bc)?;
             let bc_right = verify_gkr_quotient(&mut verifier_state, exec_log_n)?;
             if !(bc_left.0 + bc_right.0).is_zero() {
                 return Err(ProofError::InvalidProof);
