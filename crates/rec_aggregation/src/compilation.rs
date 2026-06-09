@@ -18,7 +18,7 @@ use crate::type_1_aggregation::TWEAK_TABLE_SIZE_FE_PADDED;
 // preamble memory layout: see `build_preamble_memory` in utils.py:
 // [000.. (ZERO_VEC_LEN)][10000000 (fiat-shamir domain sep)][10000 (one in extension field)][111... (NUM_REPEATED_ONES)][tweak table]
 pub const ZERO_VEC_LEN: usize = 16;
-pub const NUM_REPEATED_ONES: usize = 32;
+pub const NUM_REPEATED_ONES: usize = 64;
 pub const PREAMBLE_MEMORY_LEN: usize =
     ZERO_VEC_LEN + DIGEST_LEN + DIMENSION + NUM_REPEATED_ONES + TWEAK_TABLE_SIZE_FE_PADDED;
 

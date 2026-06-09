@@ -241,5 +241,5 @@ pub fn total_whir_statements() -> usize {
         })
         .sum::<usize>()
         // PC counted via Multiplicity::One bytecode bus
-        // + 16 // Poseidon GKR endpoint (disabled) input evaluations
+        + 16 // Poseidon GKR endpoint input evaluations (Finding 1)
 }
