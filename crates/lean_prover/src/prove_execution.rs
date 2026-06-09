@@ -300,6 +300,7 @@ pub fn prove_execution(
             prover_state.duplex();
             let gamma: EF = prover_state.sample();
 
+            let _t0 = std::time::Instant::now();
             // Step 1: Build joint pushforward P_joint (same as before — scatter eq_r into memory domain)
             let mut p_joint = EF::zero_vec(memory_size);
             let mut expected_batched_val = EF::ZERO;
@@ -325,6 +326,8 @@ pub fn prove_execution(
                 }
             }
 
+            eprintln!("    step1 P_joint: {:.0}ms", _t0.elapsed().as_secs_f64() * 1000.0);
+            let _t1 = std::time::Instant::now();
             // Step 2: Compute claimed_sum = <P_joint, memory>
             // P_joint already has gamma weighting, memory is raw
             let claimed_sum: EF = p_joint.iter().zip(memory.iter())
@@ -333,6 +336,8 @@ pub fn prove_execution(
                 "Shout: batched_val must match col_evals");
             prover_state.add_extension_scalar(claimed_sum);
 
+            eprintln!("    step2 claimed_sum: {:.0}ms", _t1.elapsed().as_secs_f64() * 1000.0);
+            let _t2 = std::time::Instant::now();
             // Step 3: Shout value sumcheck (degree 1+1=2, log(K) rounds)
             // Evaluand: P_joint[k] * memory[k] summed over Boolean hypercube
             prover_state.duplex();
@@ -344,6 +349,8 @@ pub fn prove_execution(
             );
 
             // Step 4: Tensor decomposition sumcheck per table
+            eprintln!("    step3 shout_sumcheck: {:.0}ms", _t2.elapsed().as_secs_f64() * 1000.0);
+            let _t3 = std::time::Instant::now();
             // Split s into (s_lo, s_hi) for d=2 decomposition
             let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
             let s_lo = &s_point[..half_bits];
@@ -465,6 +472,7 @@ pub fn prove_execution(
                     "Section 4.1 ONE GKR: quotient must be zero for table {}", table.name());
             }
 
+            eprintln!("    step4+ tensor+gkr: {:.0}ms", _t3.elapsed().as_secs_f64() * 1000.0);
             prover_state.duplex();
             None
         } else {
