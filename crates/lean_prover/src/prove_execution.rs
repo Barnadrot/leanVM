@@ -343,7 +343,7 @@ pub fn prove_execution(
 
             // Step 4: Tensor decomposition sumcheck per table
             // Split s into (s_lo, s_hi) for d=2 decomposition
-            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+            let half_bits = log_memory / 2;
             let s_lo = &s_point[..half_bits];
             let s_hi = &s_point[half_bits..log_memory];
 
@@ -513,7 +513,7 @@ pub fn prove_execution(
             );
 
             // Step 4: Tensor decomposition for bytecode using PC_HI/PC_LO
-            let half_bits_bc = HALF_BITS_BC;
+            let half_bits_bc = log_bytecode / 2;
             let bc_s_lo = &bc_s_point[..half_bits_bc];
             let bc_s_hi = &bc_s_point[half_bits_bc..log_bytecode];
 
