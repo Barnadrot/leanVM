@@ -40,14 +40,10 @@ def _absorb_chunks_runtime(fs, data, n_chunks, new_transcript_ptr):
 
 
 def fs_receive_ef_runtime(fs, n_ef_elements, n_chunks: Const):
-    # Absorb n_chunks transcript chunks (= n_ef_elements EF elements).
-    # The compiler unrolls range(1, X) when X is const. To prevent this,
-    # read n_chunks from a hint (genuinely runtime) and verify it.
-    n_chunks_hint = Array(1)
-    hint_witness("pf_n_chunks", n_chunks_hint)
-    assert n_chunks_hint[0] == n_chunks  # verify hint matches expected
+    # Absorb n_chunks transcript chunks using runtime loop.
+    # _absorb_chunks_runtime uses range() which is never unrolled.
     transcript_ptr = fs[16]
-    new_fs = _absorb_chunks_runtime(fs, transcript_ptr, n_chunks_hint[0], transcript_ptr + n_chunks_hint[0] * DIGEST_LEN)
+    new_fs = _absorb_chunks_runtime(fs, transcript_ptr, n_chunks, transcript_ptr + n_chunks * DIGEST_LEN)
     return new_fs, transcript_ptr
 
 

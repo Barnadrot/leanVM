@@ -582,7 +582,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     fs = fs_duplex(fs)
     fs, _bc_alpha_sel = fs_sample_ef(fs)
 
-    half_bits_bc = min(MEM_BIND_HALF_BITS_MAX, LOG_GUEST_BYTECODE_LEN)
+    half_bits_bc = MEM_BIND_HALF_BITS_MAX
     sqrt_bc = SQRT_K_BC
     # Receive bytecode pushforward via runtime absorb
     sqrt_bc_runtime = two_exp(half_bits_bc)
