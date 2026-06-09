@@ -1,6 +1,6 @@
 use backend::*;
 use lean_vm::{
-    ALL_TABLES, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE, STARTING_PC,
+    ALL_TABLES, BusMultiplicity, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE, STARTING_PC,
     sort_tables_by_height,
 };
 use lean_vm::{EF, F, Table, TableT, TableTrace};
@@ -228,7 +228,7 @@ pub fn total_whir_statements() -> usize {
         .iter()
         .map(|table| {
             let mut seen_cols = std::collections::HashSet::<ColIndex>::new();
-            for bus in table.bus_interactions().iter().filter(|b| b.is_memory_lookup()) {
+            for bus in table.bus_interactions().iter().filter(|b| matches!(b.multiplicity, BusMultiplicity::One)) {
                 for entry in &bus.data {
                     if let Some(col) = entry.column() {
                         seen_cols.insert(col);
@@ -240,6 +240,6 @@ pub fn total_whir_statements() -> usize {
             n_committed + table.n_shift_columns() + committed_seen
         })
         .sum::<usize>()
-        + 1 // PC (bytecode-bound)
-        + 16 // Poseidon GKR endpoint input evaluations
+        // PC counted via Multiplicity::One bytecode bus
+        // + 16 // Poseidon GKR endpoint (disabled) input evaluations
 }
