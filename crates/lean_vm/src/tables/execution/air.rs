@@ -49,6 +49,12 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
     fn n_columns(&self) -> usize {
         N_TOTAL_EXECUTION_COLUMNS
     }
+    fn n_committed_columns(&self) -> usize {
+        N_RUNTIME_COLUMNS
+    }
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        Some(N_RUNTIME_COLUMNS..N_TOTAL_EXECUTION_COLUMNS)
+    }
     fn degree_air(&self) -> usize {
         5
     }
