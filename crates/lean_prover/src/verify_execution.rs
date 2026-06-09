@@ -297,12 +297,13 @@ pub fn verify_execution(
             let sqrt_bc = 1usize << half_bits_bc;
             let _p_bc_batched = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
 
-            let gkr_log_bc = half_bits_bc.max(N_VARS_TO_SEND_GKR_COEFFS + 1); let bc_left = verify_gkr_quotient(&mut verifier_state, gkr_log_bc)?;
+            let _bc_c_pf: EF = verifier_state.sample(); // must match prover: sample BEFORE GKR
+            let gkr_log_bc = half_bits_bc.max(N_VARS_TO_SEND_GKR_COEFFS + 1);
+            let bc_left = verify_gkr_quotient(&mut verifier_state, gkr_log_bc)?;
             let bc_right = verify_gkr_quotient(&mut verifier_state, exec_log_n)?;
             if !(bc_left.0 + bc_right.0).is_zero() {
                 return Err(ProofError::InvalidProof);
             }
-            let _bc_c_pf = verifier_state.sample(); // match prover's c_pf sample
             verifier_state.duplex();
         }
 
