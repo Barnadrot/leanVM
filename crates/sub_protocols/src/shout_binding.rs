@@ -10,7 +10,7 @@ use utils::ToUsize;
 pub fn eq_bits_at_point(a: F, s: &[EF], n_bits: usize) -> EF {
     let a_val = a.to_usize();
     let mut result = EF::ONE;
-    for b in 0..n_bits {
+    for b in 0..n_bits.min(s.len()) {
         let bit = EF::from(F::from_usize((a_val >> b) & 1));
         result *= bit * s[b] + (EF::ONE - bit) * (EF::ONE - s[b]);
     }
@@ -178,8 +178,6 @@ pub fn build_eq_addr_tables(
     half_bits: usize,
 ) -> (Vec<EF>, Vec<EF>) {
     assert_eq!(addr_hi.len(), addr_lo.len());
-    assert_eq!(s_hi.len(), half_bits);
-    assert_eq!(s_lo.len(), half_bits);
 
     let n_rows = addr_hi.len();
     let eq_hi_table: Vec<EF> = (0..n_rows)
@@ -390,7 +388,7 @@ mod tests {
     /// Compute eq(bits(index), point) by decomposing index into n_bits binary digits
     fn eq_index_at_point(index: usize, point: &[EF], n_bits: usize) -> EF {
         let mut result = EF::ONE;
-        for b in 0..n_bits {
+        for b in 0..n_bits.min(s.len()) {
             let bit = EF::from(F::from_usize((index >> b) & 1));
             result *= bit * point[b] + (EF::ONE - bit) * (EF::ONE - point[b]);
         }

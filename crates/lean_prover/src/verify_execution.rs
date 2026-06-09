@@ -215,7 +215,7 @@ pub fn verify_execution(
             let s_point = shout_result.1;
 
             // Tensor decomposition per table
-            let half_bits = log_memory / 2;
+            let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
 
             verifier_state.duplex();
             let c_pf: EF = verifier_state.sample();
@@ -293,7 +293,7 @@ pub fn verify_execution(
             // d=2 pushforward + GKR for bytecode
             verifier_state.duplex();
             let _beta_bc: EF = verifier_state.sample();
-            let half_bits_bc = bytecode.log_size() / 2;
+            let half_bits_bc = HALF_BITS_BC.min(bytecode.log_size());
             let sqrt_bc = 1usize << half_bits_bc;
             let _p_bc_batched = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
 
