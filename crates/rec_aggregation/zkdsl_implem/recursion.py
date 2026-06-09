@@ -494,18 +494,15 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     # verify that the AIR-batched sumcheck is valid
     copy_5(check_sum, batched_air_final_value)
 
-    # --- Post-AIR binding: combined GKR-product sumcheck (V-3 + V-4) ---
+    # --- Post-AIR binding: Shout protocol (V-3 + V-4) ---
     if N_MEM_BIND_GROUPS_TOTAL != 0:
-        fs = fs_duplex(fs)
-        fs, _c_bind = fs_sample_ef(fs)
+        # Step 1: Sample gamma, receive batched_val
         fs = fs_duplex(fs)
         fs, bind_gamma = fs_sample_ef(fs)
-        fs = fs_duplex(fs)
-        fs, bind_alpha = fs_sample_ef(fs)
 
         fs, bind_batched_val = fs_receive_ef_inlined(fs, 1)
 
-        # Issue 1 check: batched_val matches column evaluations
+        # Check batched_val matches column evaluations
         expected_batched_val: Mut = ZERO_VEC_PTR
         gamma_power: Mut = ONE_EF_PTR
         for table_index in unroll(0, N_TABLES):
@@ -516,32 +513,46 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 gamma_power = mul_extension_ret(gamma_power, bind_gamma)
         copy_5(expected_batched_val, bind_batched_val)
 
-        # Left combined GKR: α*<P,memory> + Σ P/(c-j)
+        # Step 2: Shout value sumcheck (degree 2, log_memory rounds)
         fs = fs_duplex(fs)
-        fs, bind_left_q, _, _, _ = verify_gkr_quotient(fs, log_memory)
+        fs, _shout_challenges, _shout_endpoint = sumcheck_verify(fs, log_memory, bind_batched_val, 2)
 
-        # Right GKR(s): one per table with memory binding groups
-        bind_total_right: Mut = ZERO_VEC_PTR
+        # Step 3: Per-table tensor decomp + Section 4.1 pushforward + ONE GKR
+        if log_memory < MEM_BIND_HALF_BITS_MAX:
+            half_bits = log_memory
+        else:
+            half_bits = MEM_BIND_HALF_BITS_MAX
+
         for table_index in unroll(0, N_TABLES):
             if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
                 log_n_rows = table_log_heights[table_index]
-                fs, bind_right_q, _, _, _ = verify_gkr_quotient(fs, log_n_rows)
-                bind_total_right = add_extension_ret(bind_total_right, bind_right_q)
+                n_rows = table_heights[table_index]
 
-        # Balance: left - right = alpha * batched_val
-        bind_balance = sub_extension_ret(bind_left_q, bind_total_right)
-        bind_expected = mul_extension_ret(bind_alpha, bind_batched_val)
-        copy_5(bind_balance, bind_expected)
+                # Receive table contribution
+                fs, _table_contrib = fs_receive_ef_inlined(fs, 1)
+
+                # Tensor decomp sumcheck (degree 3, log_n_rows rounds)
+                fs, _td_challenges, _td_endpoint = sumcheck_verify(fs, log_n_rows, _table_contrib, 3)
+
+                # Section 4.1: receive pushforward, ONE GKR
+                fs = fs_duplex(fs)
+                fs, _alpha_sel = fs_sample_ef(fs)
+
+                sqrt_k = two_exp(half_bits)
+                fs, _pushforward = fs_receive_ef_inlined(fs, sqrt_k)
+
+                fs, _c_pf = fs_sample_ef(fs)
+
+                # ONE GKR: combined_size = next_pow2(sqrt_k + 2*n_rows)
+                log_combined = log2_ceil_runtime(sqrt_k + 2 * n_rows)
+                fs, gkr_q, _, _, _ = verify_gkr_quotient(fs, log_combined)
+                set_to_5_zeros(gkr_q)  # quotient must be zero
 
         fs = fs_duplex(fs)
 
-    # V-3: Bytecode binding (combined GKR — zero pushforward absorption)
-    fs = fs_duplex(fs)
-    fs, _c_bc = fs_sample_ef(fs)
+    # V-3: Bytecode binding (Shout protocol)
     fs = fs_duplex(fs)
     fs, bc_gamma = fs_sample_ef(fs)
-    fs = fs_duplex(fs)
-    fs, bc_alpha = fs_sample_ef(fs)
 
     fs, bc_batched_val = fs_receive_ef_inlined(fs, 1)
 
@@ -554,12 +565,29 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         bc_gp = mul_extension_ret(bc_gp, bc_gamma)
     copy_5(bc_expected, bc_batched_val)
 
+    # Shout value sumcheck (degree 2, LOG_GUEST_BYTECODE_LEN rounds)
     fs = fs_duplex(fs)
-    fs, bc_left_q, _, _, _ = verify_gkr_quotient(fs, LOG_GUEST_BYTECODE_LEN)
-    fs, bc_right_q, _, _, _ = verify_gkr_quotient(fs, log_n_cycles)
-    bc_balance = sub_extension_ret(bc_left_q, bc_right_q)
-    bc_expected_balance = mul_extension_ret(bc_alpha, bc_batched_val)
-    copy_5(bc_balance, bc_expected_balance)
+    fs, _bc_shout_ch, _bc_shout_ep = sumcheck_verify(fs, LOG_GUEST_BYTECODE_LEN, bc_batched_val, 2)
+
+    # Tensor decomp (degree 3, log_n_cycles rounds)
+    fs, _bc_pjoint_eval = fs_receive_ef_inlined(fs, 1)
+    fs, _bc_td_ch, _bc_td_ep = sumcheck_verify(fs, log_n_cycles, _bc_pjoint_eval, 3)
+
+    # Section 4.1: pushforward + ONE GKR
+    fs = fs_duplex(fs)
+    fs, _bc_alpha_sel = fs_sample_ef(fs)
+
+    half_bits_bc = min(MEM_BIND_HALF_BITS_MAX, LOG_GUEST_BYTECODE_LEN)
+    sqrt_bc = two_exp(half_bits_bc)
+    fs, _bc_pushforward = fs_receive_ef_inlined(fs, sqrt_bc)
+
+    fs, _bc_c_pf = fs_sample_ef(fs)
+
+    bc_combined_size_input = sqrt_bc + 2 * two_exp(log_n_cycles)
+    bc_log_combined = log2_ceil_runtime(bc_combined_size_input)
+    fs, bc_gkr_q, _, _, _ = verify_gkr_quotient(fs, bc_log_combined)
+    set_to_5_zeros(bc_gkr_q)  # quotient must be zero
+
     fs = fs_duplex(fs)
 
     # Phase 3: Poseidon GKR — 29 transitions with SplitEq (bare degree 3)
@@ -706,7 +734,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             copy_5(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
         pos_p_row = fr_rev
 
-    # GKR endpoint inputs verified via WHIR (N_COMMITTED=25)
+    # GKR endpoint: pos_gkr_input_evals + pos_p_row become WHIR claims
+    pos_gkr_final_point = pos_p_row
     fs = fs_duplex(fs)
 
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
@@ -733,8 +762,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     curr_randomness += DIM
     whir_sum = add_extension_ret(mul_extension_ret(value_bytecode_acc, curr_randomness), whir_sum)
     curr_randomness += DIM
-    # (memory binding no longer produces a WHIR claim — combined GKR handles it)
-
     for table_index in unroll(0, N_TABLES):
         if table_index == EXECUTION_TABLE_INDEX:
             whir_sum = add_extension_ret(mul_extension_ret(embed_in_ef(STARTING_PC), curr_randomness), whir_sum)
@@ -765,6 +792,13 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             )
             curr_randomness += DIM
 
+    # Poseidon GKR endpoint: 16 input column evaluations
+    for k in unroll(0, 16):
+        whir_sum = add_extension_ret(
+            mul_extension_ret(pos_gkr_input_evals + k * DIM, curr_randomness),
+            whir_sum,
+        )
+        curr_randomness += DIM
 
     folding_randomness_global: Mut
     s: Mut
@@ -837,8 +871,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     )
     curr_randomness += DIM
 
-    # (memory binding no longer produces a WHIR folding claim — combined GKR handles it)
-
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]
         n_rows = table_heights[table_index]
@@ -901,6 +933,29 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 mul_extension_ret(mul_extension_ret(curr_randomness, prefix), eq_factor_air),
             )
             curr_randomness += DIM
+
+    # Poseidon GKR endpoint: 16 input columns at pos_gkr_final_point
+    POSEIDON_TABLE_IDX_GKR = 2
+    pos_log_n_gkr = table_log_heights[POSEIDON_TABLE_IDX_GKR]
+    pos_n_rows_gkr = table_heights[POSEIDON_TABLE_IDX_GKR]
+    pos_offset_gkr = stacked_table_base_offset[POSEIDON_TABLE_IDX_GKR]
+    pos_cols_gkr = N_COMMITTED_AIR_COLUMNS[POSEIDON_TABLE_IDX_GKR]
+    pos_gkr_col_prefixes = compute_column_prefixes(
+        pos_offset_gkr / pos_n_rows_gkr,
+        stacked_n_vars - pos_log_n_gkr,
+        folding_randomness_global,
+        pos_cols_gkr,
+    )
+    pos_inner_fold = folding_randomness_global + (stacked_n_vars - pos_log_n_gkr) * DIM
+    eq_factor_gkr = poly_eq_extension_dynamic_ret(pos_gkr_final_point, pos_inner_fold, pos_log_n_gkr)
+    POSEIDON_INPUT_COL_START = 11  # After NU_C_HI(9), NU_C_LO(10)
+    for k in unroll(0, 16):
+        prefix = pos_gkr_col_prefixes + (POSEIDON_INPUT_COL_START + k) * DIM
+        s = add_extension_ret(
+            s,
+            mul_extension_ret(mul_extension_ret(curr_randomness, prefix), eq_factor_gkr),
+        )
+        curr_randomness += DIM
 
     copy_5(mul_extension_ret(s, final_value), end_sum)
 
