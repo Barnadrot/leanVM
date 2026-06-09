@@ -5,6 +5,7 @@ pub use air_sumcheck::*;
 pub mod bytecode_binding;
 pub mod memory_binding;
 pub mod poseidon_gkr;
+pub mod shout_binding;
 
 mod logup;
 pub use logup::*;
