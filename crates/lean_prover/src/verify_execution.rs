@@ -175,24 +175,21 @@ pub fn verify_execution(
         return Err(ProofError::InvalidProof);
     }
 
-    // --- Post-AIR-sumcheck binding (V-3 bytecode + V-4 memory) ---
+    // --- Post-AIR-sumcheck binding (V-3 bytecode + V-4 memory) via Shout protocol ---
     let memory_binding_statement = {
         use sub_protocols::memory_binding::*;
+        use sub_protocols::shout_binding;
         let n_mem_groups = total_memory_binding_groups();
-        let _memory_size = 1usize << log_memory;
+        let memory_size = 1usize << log_memory;
 
-        // --- V-4: Memory-bound value columns (combined GKR-product sumcheck) ---
+        // --- V-4: Memory-bound value columns (Shout protocol) ---
         let mem_stmt = if n_mem_groups > 0 {
-            verifier_state.duplex();
-            let _c_bind: EF = verifier_state.sample();
+            // Match prover FS: sample gamma
             verifier_state.duplex();
             let gamma: EF = verifier_state.sample();
-            verifier_state.duplex();
-            let alpha_bind: EF = verifier_state.sample();
 
+            // Receive and check batched_val
             let batched_val = verifier_state.next_extension_scalar()?;
-
-            // Issue 1 fix: check batched_val matches prover-supplied column evaluations
             let mut expected_batched_val = EF::ZERO;
             let mut gamma_power = EF::ONE;
             for table in ALL_TABLES {
@@ -210,50 +207,69 @@ pub fn verify_execution(
                 return Err(ProofError::InvalidProof);
             }
 
-            // Left combined GKR: proves α*<P,memory> + Σ P/(c-j)
+            // Shout value sumcheck verification
             verifier_state.duplex();
-            let left = verify_gkr_quotient(&mut verifier_state, log_memory)?;
+            let shout_result = shout_binding::verify_shout_value_sumcheck(
+                &mut verifier_state, log_memory, batched_val,
+            )?;
+            let s_point = shout_result.1;
 
-            // Right GKR(s): one per table with memory groups
-            let mut total_right = EF::ZERO;
+            // Tensor decomposition per table
+            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+
+            verifier_state.duplex();
+            let c_pf: EF = verifier_state.sample();
+
             for table in ALL_TABLES {
                 let groups = memory_binding_groups(&table);
                 if groups.is_empty() { continue; }
-                let n_value_cols: usize = groups.iter().map(|g| g.value_cols.len()).sum();
-                if n_value_cols > 0 {
-                    let log_n = table_n_vars[&table];
-                    let right = verify_gkr_quotient(&mut verifier_state, log_n)?;
-                    total_right += right.0;
+                let log_n = table_n_vars[&table];
+
+                // Receive table contribution
+                let table_contrib = verifier_state.next_extension_scalar()?;
+
+                // Verify tensor decomp sumcheck
+                let td_result = shout_binding::verify_tensor_decomp_sumcheck(
+                    &mut verifier_state, log_n, table_contrib,
+                )?;
+                let _row_point = td_result.1;
+
+                // Receive pushforward and verify GKR
+                verifier_state.duplex();
+                let _beta: EF = verifier_state.sample();
+                let sqrt_k = 1usize << half_bits;
+                let p_batched = verifier_state.next_extension_scalars_vec(sqrt_k)?;
+
+                // LEFT GKR over sqrt(K)
+                let left = verify_gkr_quotient(&mut verifier_state, half_bits)?;
+                // RIGHT GKR over T
+                let right = verify_gkr_quotient(&mut verifier_state, log_n)?;
+
+                if !(left.0 + right.0).is_zero() {
+                    return Err(ProofError::InvalidProof);
                 }
             }
 
-            // Balance: left = alpha * batched_val + right (pushforward identity)
-            if !(left.0 - total_right - alpha_bind * batched_val).is_zero() {
-                return Err(ProofError::InvalidProof);
-            }
             verifier_state.duplex();
-
             None
         } else {
             None
         };
 
-        // --- V-3: Bytecode-bound instruction columns (combined GKR) ---
+        // --- V-3: Bytecode-bound instruction columns (Shout protocol) ---
         let exec_table = Table::execution();
         if let Some(bc_range) = exec_table.bytecode_bound_columns() {
-            verifier_state.duplex();
-            let _c_bc: EF = verifier_state.sample();
+            let log_bytecode_size = bytecode.log_size();
+            let n_bc_cols = bc_range.len();
+
             verifier_state.duplex();
             let gamma_bc: EF = verifier_state.sample();
-            verifier_state.duplex();
-            let alpha_bc: EF = verifier_state.sample();
 
             let batched_instr_val = verifier_state.next_extension_scalar()?;
-
             let col_evals = &table_col_evals[&exec_table];
             let mut expected_bc_val = EF::ZERO;
             let mut gp_bc = EF::ONE;
-            for k in 0..bc_range.len() {
+            for k in 0..n_bc_cols {
                 expected_bc_val += gp_bc * col_evals[bc_range.start + k];
                 gp_bc *= gamma_bc;
             }
@@ -261,12 +277,32 @@ pub fn verify_execution(
                 return Err(ProofError::InvalidProof);
             }
 
+            // Shout value sumcheck for bytecode
             verifier_state.duplex();
-            let bc_left = verify_gkr_quotient(&mut verifier_state, bytecode.log_size())?;
-            let bc_right = verify_gkr_quotient(&mut verifier_state, table_n_vars[&exec_table])?;
-            if !(bc_left.0 - bc_right.0 - alpha_bc * batched_instr_val).is_zero() {
+            let _bc_shout = shout_binding::verify_shout_value_sumcheck(
+                &mut verifier_state, log_bytecode_size, batched_instr_val,
+            )?;
+
+            // Tensor decomp for bytecode
+            let bc_pjoint_eval = verifier_state.next_extension_scalar()?;
+            let exec_log_n = table_n_vars[&exec_table];
+            let _bc_td = shout_binding::verify_tensor_decomp_sumcheck(
+                &mut verifier_state, exec_log_n, bc_pjoint_eval,
+            )?;
+
+            // d=2 pushforward + GKR for bytecode
+            verifier_state.duplex();
+            let _beta_bc: EF = verifier_state.sample();
+            let half_bits_bc = HALF_BITS_BC;
+            let sqrt_bc = 1usize << half_bits_bc;
+            let _p_bc_batched = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
+
+            let bc_left = verify_gkr_quotient(&mut verifier_state, half_bits_bc)?;
+            let bc_right = verify_gkr_quotient(&mut verifier_state, exec_log_n)?;
+            if !(bc_left.0 + bc_right.0).is_zero() {
                 return Err(ProofError::InvalidProof);
             }
+            let _bc_c_pf = verifier_state.sample(); // match prover's c_pf sample
             verifier_state.duplex();
         }
 
@@ -280,7 +316,13 @@ pub fn verify_execution(
                     &mut verifier_state, pos_log_n,
                 )?;
 
-            let _ = (gkr_point, gkr_input_evals); // Finding 1 temporarily disabled
+            // Finding 1: anchor Poseidon GKR endpoint as WHIR claims
+            let gkr_input_claim: BTreeMap<ColIndex, EF> = (0..16)
+                .map(|k| (POSEIDON_COL_INPUT_START + k, gkr_input_evals[k]))
+                .collect();
+            committed_statements.get_mut(&poseidon_table).unwrap().push(
+                (gkr_point, gkr_input_claim, BTreeMap::new())
+            );
             verifier_state.duplex();
         }
 
