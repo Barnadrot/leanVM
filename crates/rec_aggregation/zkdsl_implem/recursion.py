@@ -48,7 +48,7 @@ N_MEM_BIND_VALUE_COLS_TOTAL = N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER
 MEM_BIND_VALUE_COLS = MEM_BIND_VALUE_COLS_PLACEHOLDER
 MEM_BIND_HALF_BITS_MAX = MEM_BIND_HALF_BITS_MAX_PLACEHOLDER
 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX  # compile-time: pushforward size for memory binding
-SQRT_K_BC = 2**MEM_BIND_HALF_BITS_MAX  # = SQRT_K_MEM since both use the same half_bits
+SQRT_K_BC = 2**MEM_BIND_HALF_BITS_MAX
 STARTING_PC = STARTING_PC_PLACEHOLDER
 ENDING_PC = ENDING_PC_PLACEHOLDER
 
@@ -541,12 +541,11 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 fs, _alpha_sel = fs_sample_ef(fs)
 
                 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
-                # Receive pushforward in runtime loop to avoid compile-time unroll explosion
+                # Receive pushforward one element at a time (runtime loop)
                 _pushforward = Array(SQRT_K_MEM * DIM)
-                for _pf_chunk in range(0, SQRT_K_MEM // 64):
-                    fs, _pf_part = fs_receive_ef(fs, 64)
-                    for _pf_j in unroll(0, 64 * DIM):
-                        _pushforward[_pf_chunk * 64 * DIM + _pf_j] = _pf_part[_pf_j]
+                for _pf_i in range(0, SQRT_K_MEM):
+                    fs, _pf_el = fs_receive_ef_inlined(fs, 1)
+                    copy_5(_pf_el, _pushforward + _pf_i * DIM)
 
                 fs, _c_pf = fs_sample_ef(fs)
 
@@ -586,12 +585,11 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
 
     half_bits_bc = min(MEM_BIND_HALF_BITS_MAX, LOG_GUEST_BYTECODE_LEN)
     sqrt_bc = SQRT_K_BC
-    # Receive bytecode pushforward in chunks
+    # Receive bytecode pushforward one element at a time (runtime loop)
     _bc_pushforward = Array(SQRT_K_BC * DIM)
-    for _bc_chunk in range(0, SQRT_K_BC // 64):
-        fs, _bc_part = fs_receive_ef(fs, 64)
-        for _bc_j in unroll(0, 64 * DIM):
-            _bc_pushforward[_bc_chunk * 64 * DIM + _bc_j] = _bc_part[_bc_j]
+    for _bc_i in range(0, SQRT_K_BC):
+        fs, _bc_el = fs_receive_ef_inlined(fs, 1)
+        copy_5(_bc_el, _bc_pushforward + _bc_i * DIM)
 
     fs, _bc_c_pf = fs_sample_ef(fs)
 
