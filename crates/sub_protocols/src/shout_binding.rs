@@ -7,7 +7,7 @@ use utils::ToUsize;
 /// Decomposes `a` into `n_bits` binary digits and computes:
 ///   prod_{b=0}^{n_bits-1} (bit_b * s[b] + (1 - bit_b) * (1 - s[b]))
 #[inline]
-fn eq_bits_at_point(a: F, s: &[EF], n_bits: usize) -> EF {
+pub fn eq_bits_at_point(a: F, s: &[EF], n_bits: usize) -> EF {
     let a_val = a.to_usize();
     let mut result = EF::ONE;
     for b in 0..n_bits {

@@ -295,16 +295,16 @@ pub fn prove_execution(
 
         let n_mem_groups: usize = all_groups.iter().map(|(_, gs)| gs.len()).sum();
         let mem_stmt = if n_mem_groups > 0 {
-            prover_state.duplex();
-            let c_bind: EF = prover_state.sample();
+            use sub_protocols::shout_binding;
+
             prover_state.duplex();
             let gamma: EF = prover_state.sample();
-            prover_state.duplex();
-            let alpha_bind: EF = prover_state.sample();
 
-            let mut p_batched = EF::zero_vec(memory_size);
+            // Step 1: Build joint pushforward P_joint (same as before — scatter eq_r into memory domain)
+            let mut p_joint = EF::zero_vec(memory_size);
             let mut expected_batched_val = EF::ZERO;
             let mut gamma_power = EF::ONE;
+            let mut total_value_cols = 0usize;
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
                 let eq_r = &eq_rs[table];
@@ -315,89 +315,151 @@ pub fn prove_execution(
                         for (i, &addr) in addr_col.iter().enumerate() {
                             let j = addr.to_usize() + k;
                             if j < memory_size {
-                                p_batched[j] += gamma_power * eq_r[i];
+                                p_joint[j] += gamma_power * eq_r[i];
                             }
                         }
                         expected_batched_val += gamma_power * col_evals[group.value_cols[k]];
                         gamma_power *= gamma;
+                        total_value_cols += 1;
                     }
                 }
             }
 
-            let batched_val: EF = p_batched.iter().zip(memory.iter())
+            // Step 2: Compute batched memory and verify claimed sum
+            let batched_mem = shout_binding::compute_batched_memory(&memory, total_value_cols, gamma);
+            let claimed_sum: EF = p_joint.iter().zip(batched_mem.iter())
                 .map(|(&p, &m)| p * m).sum();
-            debug_assert_eq!(batched_val, expected_batched_val,
-                "batched_val from pushforward must match col_evals for virtual value columns");
-            prover_state.add_extension_scalar(batched_val);
+            debug_assert_eq!(claimed_sum, expected_batched_val,
+                "Shout: batched_val must match col_evals");
+            prover_state.add_extension_scalar(claimed_sum);
 
-            // Combined GKR-product sumcheck (LEFT side):
-            // nums[j] = P[j] * (alpha * memory[j] * (c-j) + 1)
-            // dens[j] = (c - j)
-            // total = alpha * <P, memory> + Σ P[j]/(c-j)
-            let pivot = ENDIANNESS_PIVOT_GKR.min(log_memory);
-            let combined_nums: Vec<EF> = (0..memory_size)
-                .map(|j| p_batched[j] * (alpha_bind * EF::from(memory[j]) * (c_bind - EF::from_usize(j)) + EF::ONE))
-                .collect();
-            let combined_dens: Vec<EF> = (0..memory_size)
-                .map(|j| c_bind - EF::from_usize(j))
-                .collect();
-
-            let nums_packed = pack_ef(&combined_nums);
-            let dens_packed = pack_ef(&combined_dens);
-            let nums_br = br_packed(&nums_packed, pivot);
-            let dens_br = br_packed(&dens_packed, pivot);
-
+            // Step 3: Shout value sumcheck (degree 2, log(K) rounds)
             prover_state.duplex();
-            let left = prove_gkr_quotient_ext(&mut prover_state, &nums_br, &dens_br, pivot);
+            let mut p_joint_fold = p_joint;
+            let mut batched_mem_fold = batched_mem[..memory_size].to_vec();
+            let (_shout_endpoint, s_point) = shout_binding::prove_shout_value_sumcheck(
+                &mut prover_state, &mut p_joint_fold, &mut batched_mem_fold, claimed_sum,
+            );
 
-            // RIGHT side: one GKR per table (trace side)
-            // Σ_i eq_r[i] / (c_bind - addr[i]+k) for each (group, k)
-            let mut total_right = EF::ZERO;
-            let mut gp_global = EF::ONE;
+            // Step 4: Tensor decomposition sumcheck per table
+            // Split s into (s_lo, s_hi) for d=2 decomposition
+            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+            let s_lo = &s_point[..half_bits];
+            let s_hi = &s_point[half_bits..log_memory];
+
+            // P_joint_tilde(s) = Σ_table table_contrib(s)
+            // For each table, prove table_contrib via tensor decomp sumcheck
+            prover_state.duplex();
+            let c_pf: EF = prover_state.sample(); // challenge for pushforward GKR
+
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
                 let eq_r = &eq_rs[table];
                 let log_n = trace.log_n_rows;
                 let n_rows = 1usize << log_n;
 
-                let mut right_nums = EF::zero_vec(n_rows);
-                let mut right_dens = EF::zero_vec(n_rows);
-                let mut first_term = true;
+                // Build combined eq_addr tables weighted by gamma across groups
+                let mut combined_eq_hi = EF::zero_vec(n_rows);
+                let mut combined_eq_lo = EF::zero_vec(n_rows);
+                let mut gp = EF::ONE; // track gamma power for this table's groups
+                // Find this table's gamma offset
+                let mut table_gamma_offset = EF::ONE;
+                let mut found = false;
+                let mut gp_scan = EF::ONE;
+                for (t, gs) in &all_groups {
+                    if *t == *table { table_gamma_offset = gp_scan; found = true; break; }
+                    for g in gs { for _ in 0..g.value_cols.len() { gp_scan *= gamma; } }
+                }
+                assert!(found);
+                gp = table_gamma_offset;
+
                 for group in groups {
+                    let addr_col = &trace.columns[group.addr_col];
+                    // Find hi/lo columns for this group's addr
+                    let memory_bounds = table.memory_bound_columns();
+                    // addr_hi/lo columns depend on the table structure
+                    // For extension: COL_IDX_X_HI/LO, for poseidon: POSEIDON_COL_NU_C_HI/LO
+                    // We need to map group.addr_col to its hi/lo columns
+                    // TODO: this mapping needs to come from the table trait
+
                     for k in 0..group.value_cols.len() {
-                        let addr_col = &trace.columns[group.addr_col];
                         for i in 0..n_rows {
                             let addr_val = addr_col[i].to_usize() + k;
-                            let den_i = c_bind - EF::from_usize(addr_val);
-                            if first_term {
-                                right_nums[i] = gp_global * eq_r[i];
-                                right_dens[i] = den_i;
-                            } else {
-                                right_nums[i] = right_nums[i] * den_i + gp_global * eq_r[i] * right_dens[i];
-                                right_dens[i] = right_dens[i] * den_i;
-                            }
+                            let hi = addr_val >> half_bits;
+                            let lo = addr_val & ((1 << half_bits) - 1);
+                            let eq_hi = shout_binding::eq_bits_at_point(F::from_usize(hi), s_hi, half_bits);
+                            let eq_lo = shout_binding::eq_bits_at_point(F::from_usize(lo), s_lo, half_bits);
+                            combined_eq_hi[i] += gp * eq_hi;
+                            combined_eq_lo[i] += gp * eq_lo;
                         }
-                        gp_global *= gamma;
-                        first_term = false;
+                        gp *= gamma;
                     }
                 }
 
+                // Tensor decomp sumcheck for this table
+                let mut eq_r_fold = eq_r.clone();
+                let mut eq_hi_fold = combined_eq_hi;
+                let mut eq_lo_fold = combined_eq_lo;
+                let table_contrib: EF = eq_r_fold.iter()
+                    .zip(eq_hi_fold.iter())
+                    .zip(eq_lo_fold.iter())
+                    .map(|((&e, &h), &l)| e * h * l)
+                    .sum();
+                prover_state.add_extension_scalar(table_contrib);
+
+                let (_hi_eval, _lo_eval, row_point) = shout_binding::prove_tensor_decomp_sumcheck(
+                    &mut prover_state, &mut eq_r_fold, &mut eq_hi_fold, &mut eq_lo_fold, table_contrib,
+                );
+
+                // d=2 pushforward at tensor decomp endpoint
+                let eq_row_prime = eval_eq(&row_point);
+                prover_state.duplex();
+                let beta: EF = prover_state.sample();
+                let addr_col = &trace.columns[groups[0].addr_col];
+                let addr_hi_vals: Vec<F> = addr_col.iter().map(|&a| F::from_usize(a.to_usize() >> half_bits)).collect();
+                let addr_lo_vals: Vec<F> = addr_col.iter().map(|&a| F::from_usize(a.to_usize() & ((1 << half_bits) - 1))).collect();
+                let (p_hi, p_lo, p_batched_pf) = shout_binding::compute_d2_pushforward(
+                    &addr_hi_vals, &addr_lo_vals, &eq_row_prime, half_bits, beta,
+                );
+
+                // Send pushforward to transcript
+                prover_state.add_extension_scalars(&p_batched_pf);
+
+                // GKR for pushforward well-formedness
+                let sqrt_k = 1usize << half_bits;
+                let log_sqrt_k = half_bits;
+
+                // LEFT GKR: Σ_h P_batched[h]/(c_pf - h)
+                let left_nums: Vec<EF> = p_batched_pf.iter().map(|&p| -p).collect();
+                let left_dens: Vec<EF> = (0..sqrt_k).map(|h| c_pf - EF::from_usize(h)).collect();
+                let pivot_left = ENDIANNESS_PIVOT_GKR.min(log_sqrt_k);
+                let left_nums_packed = pack_ef(&left_nums);
+                let left_dens_packed = pack_ef(&left_dens);
+                let left_nums_br = br_packed(&left_nums_packed, pivot_left);
+                let left_dens_br = br_packed(&left_dens_packed, pivot_left);
+                let left = prove_gkr_quotient_ext(&mut prover_state, &left_nums_br, &left_dens_br, pivot_left);
+
+                // RIGHT GKR: Σ_row eq_row_prime[row]/(c_pf - addr_hi[row]) + beta * Σ_row eq_row_prime[row]/(c_pf - addr_lo[row])
+                let right_nums: Vec<EF> = (0..n_rows).map(|i| {
+                    let den_hi = c_pf - EF::from(addr_hi_vals[i]);
+                    let den_lo = c_pf - EF::from(addr_lo_vals[i]);
+                    eq_row_prime[i] * den_lo + beta * eq_row_prime[i] * den_hi
+                }).collect();
+                let right_dens: Vec<EF> = (0..n_rows).map(|i| {
+                    (c_pf - EF::from(addr_hi_vals[i])) * (c_pf - EF::from(addr_lo_vals[i]))
+                }).collect();
+                let pivot_right = ENDIANNESS_PIVOT_GKR.min(log_n);
                 let right_nums_packed = pack_ef(&right_nums);
                 let right_dens_packed = pack_ef(&right_dens);
-                let pivot_right = ENDIANNESS_PIVOT_GKR.min(log_n);
                 let right_nums_br = br_packed(&right_nums_packed, pivot_right);
                 let right_dens_br = br_packed(&right_dens_packed, pivot_right);
+                let _right = prove_gkr_quotient_ext(&mut prover_state, &right_nums_br, &right_dens_br, pivot_right);
 
-                let right = prove_gkr_quotient_ext(
-                    &mut prover_state, &right_nums_br, &right_dens_br, pivot_right,
-                );
-                total_right += right.0;
+                debug_assert!((left.0 + _right.0).is_zero(),
+                    "Shout pushforward GKR balance failed for table {}", table.name());
             }
 
-            debug_assert!((left.0 - total_right - alpha_bind * batched_val).is_zero(),
-                "combined GKR balance: left - right - alpha*val must be zero");
             prover_state.duplex();
-
             None
         } else {
             None
