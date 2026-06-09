@@ -14,9 +14,9 @@ pub const EXEC_COL_ADDR_C: usize = 4;
 pub const EXEC_COL_VALUE_A: usize = 5;
 pub const EXEC_COL_VALUE_B: usize = 6;
 pub const EXEC_COL_VALUE_C: usize = 7;
+// d=2 address decomposition columns for PC (for Shout logup*)
 pub const EXEC_COL_PC_HI: usize = 8;
 pub const EXEC_COL_PC_LO: usize = 9;
-pub const HALF_BITS_BC: usize = MAX_BYTECODE_LOG_SIZE / 2;
 
 // Decoded instruction columns
 pub const EXEC_COL_OPERAND_A: usize = 10;
@@ -39,17 +39,15 @@ pub const EXEC_COL_NU_A: usize = 23;
 pub const EXEC_COL_NU_B: usize = 24;
 pub const EXEC_COL_NU_C: usize = 25;
 
+/// Number of bits in the low half of the PC decomposition for d=2 Shout.
+/// HALF_BITS_BC = MAX_BYTECODE_LOG_SIZE / 2 = 11, so the split modulus is 2^11.
+pub const HALF_BITS_BC: usize = MAX_BYTECODE_LOG_SIZE / 2;
+
 impl<const BUS: bool> Air for ExecutionTable<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
 
     fn n_columns(&self) -> usize {
         N_TOTAL_EXECUTION_COLUMNS
-    }
-    fn n_committed_columns(&self) -> usize {
-        N_RUNTIME_COLUMNS
-    }
-    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
-        Some(N_RUNTIME_COLUMNS..N_TOTAL_EXECUTION_COLUMNS)
     }
     fn degree_air(&self) -> usize {
         5
@@ -86,6 +84,8 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         let pc = flat[EXEC_COL_PC];
         let fp = flat[EXEC_COL_FP];
         let (addr_a, addr_b, addr_c) = (flat[EXEC_COL_ADDR_A], flat[EXEC_COL_ADDR_B], flat[EXEC_COL_ADDR_C]);
+        let pc_hi = flat[EXEC_COL_PC_HI];
+        let pc_lo = flat[EXEC_COL_PC_LO];
 
         let one_minus_flag_a_and_flag_ab_fp = -(flag_a + flag_ab_fp - AB::F::ONE);
         let one_minus_flag_b_and_flag_ab_fp = -(flag_b + flag_ab_fp - AB::F::ONE);
@@ -111,6 +111,10 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
             builder.declare_values(&[flag_precompile]);
             builder.declare_values(&[nu_a, nu_b, nu_c, aux_2]);
         }
+
+        // d=2 PC decomposition: PC = PC_HI * 2^HALF_BITS_BC + PC_LO
+        let half_bits_bc_modulus = AB::F::from_usize(1usize << HALF_BITS_BC);
+        builder.assert_zero(pc - pc_hi * half_bits_bc_modulus - pc_lo);
 
         builder.assert_zero(one_minus_flag_a_and_flag_ab_fp * (addr_a - fp_plus_operand_a));
         builder.assert_zero(one_minus_flag_b_and_flag_ab_fp * (addr_b - fp_plus_operand_b));

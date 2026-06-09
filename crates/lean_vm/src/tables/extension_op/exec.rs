@@ -1,7 +1,7 @@
-use crate::MAX_LOG_MEMORY_SIZE;
 use crate::DIMENSION;
 use crate::EF;
 use crate::F;
+use crate::MAX_LOG_MEMORY_SIZE;
 use crate::MemoryAccess;
 use crate::RunnerError;
 use crate::TableTrace;
@@ -168,14 +168,19 @@ pub(super) fn exec_multi_row(
         trace.columns[COL_IDX_A].push(idx_as[i]);
         trace.columns[COL_IDX_B].push(idx_bs[i]);
         trace.columns[COL_IDX_RES].push(ptr_res);
-            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
-            let half_mask = (1usize << half_bits) - 1;
-            trace.columns[COL_IDX_A_HI].push(F::from_usize(idx_as[i].to_usize() >> half_bits));
-            trace.columns[COL_IDX_A_LO].push(F::from_usize(idx_as[i].to_usize() & half_mask));
-            trace.columns[COL_IDX_B_HI].push(F::from_usize(idx_bs[i].to_usize() >> half_bits));
-            trace.columns[COL_IDX_B_LO].push(F::from_usize(idx_bs[i].to_usize() & half_mask));
-            trace.columns[COL_IDX_RES_HI].push(F::from_usize(ptr_res.to_usize() >> half_bits));
-            trace.columns[COL_IDX_RES_LO].push(F::from_usize(ptr_res.to_usize() & half_mask));
+
+        // d=2 address decomposition: addr = addr_hi * 2^HALF_BITS + addr_lo
+        let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+        let half_mask = (1usize << half_bits) - 1;
+        let addr_a = idx_as[i].to_usize();
+        let addr_b = idx_bs[i].to_usize();
+        let addr_res = ptr_res.to_usize();
+        trace.columns[COL_IDX_A_HI].push(F::from_usize(addr_a >> half_bits));
+        trace.columns[COL_IDX_A_LO].push(F::from_usize(addr_a & half_mask));
+        trace.columns[COL_IDX_B_HI].push(F::from_usize(addr_b >> half_bits));
+        trace.columns[COL_IDX_B_LO].push(F::from_usize(addr_b & half_mask));
+        trace.columns[COL_IDX_RES_HI].push(F::from_usize(addr_res >> half_bits));
+        trace.columns[COL_IDX_RES_LO].push(F::from_usize(addr_res & half_mask));
 
         // COL_V_A+0..5: filled later by fill_trace_extension_op (push zeros as placeholders)
         for k in 0..DIMENSION {
@@ -210,4 +215,3 @@ pub fn fill_trace_extension_op(trace: &mut TableTrace, memory: &[F]) {
         }
     }
 }
-

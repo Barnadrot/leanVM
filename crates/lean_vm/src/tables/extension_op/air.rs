@@ -18,6 +18,8 @@ pub(super) const COL_IDX_B: usize = 7;
 pub(super) const COL_ACC: usize = 8;
 // --- flat-only columns ---
 pub(super) const COL_IDX_RES: usize = 13;
+// d=2 address decomposition columns (committed, flat-only)
+// addr = addr_hi * 2^HALF_BITS + addr_lo, where HALF_BITS = MAX_LOG_MEMORY_SIZE / 2
 pub(super) const COL_IDX_A_HI: usize = 14;
 pub(super) const COL_IDX_A_LO: usize = 15;
 pub(super) const COL_IDX_B_HI: usize = 16;
@@ -50,16 +52,6 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
     fn n_columns(&self) -> usize {
         35
     }
-    fn n_committed_columns(&self) -> usize {
-        COL_IDX_RES_LO + 1
-    }
-    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
-        vec![
-            (COL_IDX_A, COL_V_A..COL_V_A + crate::DIMENSION),
-            (COL_IDX_B, COL_V_B..COL_V_B + crate::DIMENSION),
-            (COL_IDX_RES, COL_RES..COL_RES + crate::DIMENSION),
-        ]
-    }
     fn degree_air(&self) -> usize {
         6
     }
@@ -83,12 +75,6 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         let len = flat[COL_LEN];
         let idx_a = flat[COL_IDX_A];
         let idx_b = flat[COL_IDX_B];
-        let idx_a_hi = flat[COL_IDX_A_HI];
-        let idx_a_lo = flat[COL_IDX_A_LO];
-        let idx_b_hi = flat[COL_IDX_B_HI];
-        let idx_b_lo = flat[COL_IDX_B_LO];
-        let idx_res_hi = flat[COL_IDX_RES_HI];
-        let idx_res_lo = flat[COL_IDX_RES_LO];
 
         let v_a: [AB::IF; 5] = std::array::from_fn(|k| flat[COL_V_A + k]);
         let v_b: [AB::IF; 5] = std::array::from_fn(|k| flat[COL_V_B + k]);
@@ -116,6 +102,13 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
             + len * AB::F::from_usize(EXT_OP_LEN_MULTIPLIER);
 
         let idx_r = flat[COL_IDX_RES];
+
+        // d=2 address decomposition: addr = addr_hi * 2^HALF_BITS + addr_lo
+        // Pre-compute constraint expressions while `flat` is still borrowed.
+        let half_bits_modulus = AB::F::from_usize(1 << (crate::MAX_LOG_MEMORY_SIZE / 2));
+        let decomp_a = idx_a - flat[COL_IDX_A_HI] * half_bits_modulus - flat[COL_IDX_A_LO];
+        let decomp_b = idx_b - flat[COL_IDX_B_HI] * half_bits_modulus - flat[COL_IDX_B_LO];
+        let decomp_res = idx_r - flat[COL_IDX_RES_HI] * half_bits_modulus - flat[COL_IDX_RES_LO];
 
         if BUS {
             eval_bus_virtual::<AB, EF>(builder, extra_data, multiplicity, aux_2, &[idx_a, idx_b, idx_r]);
@@ -178,12 +171,9 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
 
         builder.assert_zero(flag_start_shift * (len - AB::F::ONE));
 
-        let half_bits_modulus = AB::F::from_usize(1usize << (crate::MAX_LOG_MEMORY_SIZE / 2));
-        let decomp_a = idx_a - idx_a_hi * half_bits_modulus - idx_a_lo;
-        let decomp_b = idx_b - idx_b_hi * half_bits_modulus - idx_b_lo;
-        let decomp_r = idx_r - idx_res_hi * half_bits_modulus - idx_res_lo;
+        // d=2 address decomposition constraints
         builder.assert_zero(decomp_a);
         builder.assert_zero(decomp_b);
-        builder.assert_zero(decomp_r);
+        builder.assert_zero(decomp_res);
     }
 }

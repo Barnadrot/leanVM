@@ -110,12 +110,10 @@ pub const POSEIDON_COL_FLAG_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 7;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 8;
 // 25 committed: 9 flags/control + 16 inputs. GKR endpoint verified via WHIR.
-pub const POSEIDON_COL_NU_C_HI: ColIndex = 9;
-pub const POSEIDON_COL_NU_C_LO: ColIndex = 10;
-pub const N_COMMITTED_COLS_POSEIDON_16: usize = 11 + WIDTH;
-pub const POSEIDON_COL_INPUT_START: ColIndex = 11;
-pub const POSEIDON_COL_OUT_LO: ColIndex = 11 + WIDTH;
-pub const POSEIDON_COL_OUT_HI: ColIndex = 11 + WIDTH + WIDTH / 2;
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 9 + WIDTH;
+pub const POSEIDON_COL_INPUT_START: ColIndex = 9;
+pub const POSEIDON_COL_OUT_LO: ColIndex = 9 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = 9 + WIDTH + WIDTH / 2;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -201,10 +199,6 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         *perm.addr_left_lo = F::from_usize(zero_vec_ptr);
         *perm.addr_left_hi = F::from_usize(zero_vec_ptr + HALF_DIGEST_LEN);
         *perm.flag_permute = F::ZERO;
-        let half_bits = MAX_LOG_MEMORY_SIZE / 2;
-        let half_mask = (1usize << half_bits) - 1;
-        *perm.nu_c_hi = F::from_usize(null_hash_ptr >> half_bits);
-        *perm.nu_c_lo = F::from_usize(null_hash_ptr & half_mask);
         perm.out_hi.iter_mut().for_each(|x| **x = F::ZERO);
         row[POSEIDON_COL_NU_A] = F::from_usize(zero_vec_ptr);
         row[POSEIDON_COL_DOMAINSEP] = F::from_usize(POSEIDON_DOMAINSEP_BASE);
@@ -333,7 +327,7 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
     }
     fn n_constraints(&self) -> usize {
         // Bus: 2, bool checks: 4, flag mutual exclusion: 1, addr checks: 2, compression: 2*8=16
-        2 * BUS as usize + 4 + 1 + 1 + 2 + 2 * (WIDTH / 2)
+        2 * BUS as usize + 4 + 1 + 2 + 2 * (WIDTH / 2)
     }
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
         let cols: Poseidon1Cols16<AB::IF> = {
@@ -378,10 +372,6 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         builder.assert_zero(cols.flag_left * (cols.offset_left - cols.addr_left_lo));
         builder.assert_zero(one_minus_flag_left * (nu_a - cols.addr_left_lo));
 
-        let half_bits_modulus = AB::F::from_usize(1usize << (MAX_LOG_MEMORY_SIZE / 2));
-        let decomp_nu_c = cols.nu_c - cols.nu_c_hi * half_bits_modulus - cols.nu_c_lo;
-        builder.assert_zero(decomp_nu_c);
-
         eval_poseidon1_16(builder, &cols)
     }
 }
@@ -399,8 +389,7 @@ pub(super) struct Poseidon1Cols16<T> {
     pub flag_left: T,
     pub offset_left: T,
     pub flag_permute: T,
-    pub nu_c_hi: T,
-    pub nu_c_lo: T,
+    // committed columns (9..25, inputs stacked in PCS)
     pub inputs: [T; WIDTH],
     // virtual columns (25..41, memory-bound outputs)
     pub out_lo: [T; WIDTH / 2],

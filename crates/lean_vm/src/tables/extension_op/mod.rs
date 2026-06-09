@@ -116,6 +116,7 @@ impl<const BUS: bool> TableT for ExtensionOpPrecompile<BUS> {
         row[COL_IDX_A] = F::from_usize(zero_vec_ptr);
         row[COL_IDX_B] = F::from_usize(zero_vec_ptr);
         row[COL_IDX_RES] = F::from_usize(zero_vec_ptr);
+        // d=2 address decomposition for padding row
         let half_bits = crate::MAX_LOG_MEMORY_SIZE / 2;
         let half_mask = (1usize << half_bits) - 1;
         row[COL_IDX_A_HI] = F::from_usize(zero_vec_ptr >> half_bits);
