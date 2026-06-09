@@ -1,7 +1,7 @@
-use crate::{EF, ExecutionTable, ExtraDataForBuses, eval_bus_virtual};
+use crate::{EF, ExecutionTable, ExtraDataForBuses, MAX_BYTECODE_LOG_SIZE, eval_bus_virtual};
 use backend::*;
 
-pub const N_RUNTIME_COLUMNS: usize = 8;
+pub const N_RUNTIME_COLUMNS: usize = 10;
 pub const N_INSTRUCTION_COLUMNS: usize = 12;
 pub const N_TOTAL_EXECUTION_COLUMNS: usize = N_INSTRUCTION_COLUMNS + N_RUNTIME_COLUMNS;
 
@@ -14,27 +14,30 @@ pub const EXEC_COL_ADDR_C: usize = 4;
 pub const EXEC_COL_VALUE_A: usize = 5;
 pub const EXEC_COL_VALUE_B: usize = 6;
 pub const EXEC_COL_VALUE_C: usize = 7;
+pub const EXEC_COL_PC_HI: usize = 8;
+pub const EXEC_COL_PC_LO: usize = 9;
+pub const HALF_BITS_BC: usize = MAX_BYTECODE_LOG_SIZE / 2;
 
 // Decoded instruction columns
-pub const EXEC_COL_OPERAND_A: usize = 8;
-pub const EXEC_COL_OPERAND_B: usize = 9;
-pub const EXEC_COL_OPERAND_C: usize = 10;
-pub const EXEC_COL_FLAG_A: usize = 11;
-pub const EXEC_COL_FLAG_B: usize = 12;
-pub const EXEC_COL_FLAG_C: usize = 13;
-pub const EXEC_COL_FLAG_C_FP: usize = 14;
-pub const EXEC_COL_FLAG_AB_FP: usize = 15;
-pub const EXEC_COL_FLAG_MUL: usize = 16;
-pub const EXEC_COL_FLAG_JUMP: usize = 17;
-pub const EXEC_COL_AUX_1: usize = 18;
-pub const EXEC_COL_AUX_2: usize = 19;
+pub const EXEC_COL_OPERAND_A: usize = 10;
+pub const EXEC_COL_OPERAND_B: usize = 11;
+pub const EXEC_COL_OPERAND_C: usize = 12;
+pub const EXEC_COL_FLAG_A: usize = 13;
+pub const EXEC_COL_FLAG_B: usize = 14;
+pub const EXEC_COL_FLAG_C: usize = 15;
+pub const EXEC_COL_FLAG_C_FP: usize = 16;
+pub const EXEC_COL_FLAG_AB_FP: usize = 17;
+pub const EXEC_COL_FLAG_MUL: usize = 18;
+pub const EXEC_COL_FLAG_JUMP: usize = 19;
+pub const EXEC_COL_AUX_1: usize = 20;
+pub const EXEC_COL_AUX_2: usize = 21;
 
 // Temporary columns (stored to avoid duplicate computations)
 pub const N_TEMPORARY_EXEC_COLUMNS: usize = 4;
-pub const EXEC_COL_FLAG_PRECOMPILE: usize = 20;
-pub const EXEC_COL_NU_A: usize = 21;
-pub const EXEC_COL_NU_B: usize = 22;
-pub const EXEC_COL_NU_C: usize = 23;
+pub const EXEC_COL_FLAG_PRECOMPILE: usize = 22;
+pub const EXEC_COL_NU_A: usize = 23;
+pub const EXEC_COL_NU_B: usize = 24;
+pub const EXEC_COL_NU_C: usize = 25;
 
 impl<const BUS: bool> Air for ExecutionTable<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
@@ -55,7 +58,7 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         2
     }
     fn n_constraints(&self) -> usize {
-        14
+        15
     }
 
     #[inline]

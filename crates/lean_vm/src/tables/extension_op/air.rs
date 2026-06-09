@@ -18,16 +18,22 @@ pub(super) const COL_IDX_B: usize = 7;
 pub(super) const COL_ACC: usize = 8;
 // --- flat-only columns ---
 pub(super) const COL_IDX_RES: usize = 13;
+pub(super) const COL_IDX_A_HI: usize = 14;
+pub(super) const COL_IDX_A_LO: usize = 15;
+pub(super) const COL_IDX_B_HI: usize = 16;
+pub(super) const COL_IDX_B_LO: usize = 17;
+pub(super) const COL_IDX_RES_HI: usize = 18;
+pub(super) const COL_IDX_RES_LO: usize = 19;
 /// v_A coordinates (5 columns).
-pub(super) const COL_V_A: usize = 14;
+pub(super) const COL_V_A: usize = 20;
 /// v_B coordinates (5 columns).
-pub(super) const COL_V_B: usize = 19;
+pub(super) const COL_V_B: usize = 25;
 /// res coordinates (5 columns).
-pub(super) const COL_RES: usize = 24;
+pub(super) const COL_RES: usize = 30;
 
 // Virtual columns (not explicitely in AIR)
-pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = 29;
-pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = 30;
+pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = 35;
+pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = 36;
 
 use backend::quintic_extension::extension::quintic_mul;
 
@@ -42,10 +48,10 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
 
     fn n_columns(&self) -> usize {
-        29
+        35
     }
     fn n_committed_columns(&self) -> usize {
-        COL_IDX_RES + 1
+        COL_IDX_RES_LO + 1
     }
     fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
         vec![
@@ -58,7 +64,7 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         6
     }
     fn n_constraints(&self) -> usize {
-        35
+        38
     }
     fn n_shift_columns(&self) -> usize {
         COL_ACC + 5
@@ -77,6 +83,12 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         let len = flat[COL_LEN];
         let idx_a = flat[COL_IDX_A];
         let idx_b = flat[COL_IDX_B];
+        let idx_a_hi = flat[COL_IDX_A_HI];
+        let idx_a_lo = flat[COL_IDX_A_LO];
+        let idx_b_hi = flat[COL_IDX_B_HI];
+        let idx_b_lo = flat[COL_IDX_B_LO];
+        let idx_res_hi = flat[COL_IDX_RES_HI];
+        let idx_res_lo = flat[COL_IDX_RES_LO];
 
         let v_a: [AB::IF; 5] = std::array::from_fn(|k| flat[COL_V_A + k]);
         let v_b: [AB::IF; 5] = std::array::from_fn(|k| flat[COL_V_B + k]);
@@ -165,5 +177,13 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         builder.assert_zero(not_start_shift * (idx_b_shift - idx_b - AB::F::from_usize(crate::DIMENSION)));
 
         builder.assert_zero(flag_start_shift * (len - AB::F::ONE));
+
+        let half_bits_modulus = AB::F::from_usize(1usize << (crate::MAX_LOG_MEMORY_SIZE / 2));
+        let decomp_a = idx_a - idx_a_hi * half_bits_modulus - idx_a_lo;
+        let decomp_b = idx_b - idx_b_hi * half_bits_modulus - idx_b_lo;
+        let decomp_r = idx_r - idx_res_hi * half_bits_modulus - idx_res_lo;
+        builder.assert_zero(decomp_a);
+        builder.assert_zero(decomp_b);
+        builder.assert_zero(decomp_r);
     }
 }

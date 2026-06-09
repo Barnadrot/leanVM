@@ -280,8 +280,12 @@ pub fn verify_execution(
                     &mut verifier_state, pos_log_n,
                 )?;
 
-            // TODO: Anchor GKR endpoint (Finding 1) — temporarily disabled
-            let _ = (gkr_point, gkr_input_evals);
+            let gkr_input_claim: BTreeMap<ColIndex, EF> = (0..16)
+                .map(|k| (POSEIDON_COL_INPUT_START + k, gkr_input_evals[k]))
+                .collect();
+            committed_statements.get_mut(&poseidon_table).unwrap().push(
+                (gkr_point, gkr_input_claim, BTreeMap::new())
+            );
             verifier_state.duplex();
         }
 
