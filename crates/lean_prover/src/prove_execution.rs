@@ -325,20 +325,22 @@ pub fn prove_execution(
                 }
             }
 
-            // Step 2: Compute batched memory and verify claimed sum
-            let batched_mem = shout_binding::compute_batched_memory(&memory, total_value_cols, gamma);
-            let claimed_sum: EF = p_joint.iter().zip(batched_mem.iter())
-                .map(|(&p, &m)| p * m).sum();
+            // Step 2: Compute claimed_sum = <P_joint, memory>
+            // P_joint already has gamma weighting, memory is raw
+            let claimed_sum: EF = p_joint.iter().zip(memory.iter())
+                .map(|(&p, &m)| p * EF::from(m)).sum();
             debug_assert_eq!(claimed_sum, expected_batched_val,
                 "Shout: batched_val must match col_evals");
             prover_state.add_extension_scalar(claimed_sum);
 
-            // Step 3: Shout value sumcheck (degree 2, log(K) rounds)
+            // Step 3: Shout value sumcheck (degree 1+1=2, log(K) rounds)
+            // Evaluand: P_joint[k] * memory[k] summed over Boolean hypercube
             prover_state.duplex();
             let mut p_joint_fold = p_joint;
-            let mut batched_mem_fold = batched_mem[..memory_size].to_vec();
+            let mut mem_ef: Vec<EF> = memory.iter().map(|&m| EF::from(m)).collect();
+            mem_ef.resize(memory_size, EF::ZERO);
             let (_shout_endpoint, s_point) = shout_binding::prove_shout_value_sumcheck(
-                &mut prover_state, &mut p_joint_fold, &mut batched_mem_fold, claimed_sum,
+                &mut prover_state, &mut p_joint_fold, &mut mem_ef, claimed_sum,
             );
 
             // Step 4: Tensor decomposition sumcheck per table
