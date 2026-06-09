@@ -552,6 +552,36 @@ pub fn prove_execution(
             );
             prover_state.add_extension_scalars(&p_bc_batched);
 
+            // Debug: verify pushforward identities
+            {
+                let sqrt_bc = 1usize << half_bits_bc;
+                let dbg_c: EF = EF::from_usize(999);
+                // Test P_hi alone
+                let left_hi: EF = (0..sqrt_bc).map(|h| {
+                    let d = dbg_c - EF::from_usize(h);
+                    if d.is_zero() { EF::ZERO } else { p_bc_hi[h] * d.try_inverse().unwrap() }
+                }).sum();
+                let right_hi: EF = (0..n_exec_rows).map(|i| {
+                    let d = dbg_c - EF::from(pc_hi_col[i]);
+                    if d.is_zero() { EF::ZERO } else { eq_bc_row_prime[i] * d.try_inverse().unwrap() }
+                }).sum();
+                eprintln!("  BC_PF: P_hi identity: {} (left={:?})", (left_hi - right_hi).is_zero(), left_hi);
+                // Test P_lo alone
+                let left_lo: EF = (0..sqrt_bc).map(|l| {
+                    let d = dbg_c - EF::from_usize(l);
+                    if d.is_zero() { EF::ZERO } else { p_bc_lo[l] * d.try_inverse().unwrap() }
+                }).sum();
+                let right_lo: EF = (0..n_exec_rows).map(|i| {
+                    let d = dbg_c - EF::from(pc_lo_col[i]);
+                    if d.is_zero() { EF::ZERO } else { eq_bc_row_prime[i] * d.try_inverse().unwrap() }
+                }).sum();
+                eprintln!("  BC_PF: P_lo identity: {} (left={:?})", (left_lo - right_lo).is_zero(), left_lo);
+                eprintln!("  BC_PF: sizes: sqrt_bc={}, n_exec_rows={}, half_bits={}", sqrt_bc, n_exec_rows, half_bits_bc);
+                eprintln!("  BC_PF: P_hi nonzero={}, P_lo nonzero={}",
+                    p_bc_hi.iter().filter(|x| !x.is_zero()).count(),
+                    p_bc_lo.iter().filter(|x| !x.is_zero()).count());
+            }
+
             // GKR for bytecode pushforward well-formedness
             let min_gkr_log = N_VARS_TO_SEND_GKR_COEFFS + 1;
             let gkr_log_bc = half_bits_bc.max(min_gkr_log);
