@@ -465,9 +465,11 @@ pub fn prove_execution(
             None
         };
 
-        // --- V-3: Bytecode-bound instruction columns (combined GKR) ---
+        // --- V-3: Bytecode-bound instruction columns (Shout protocol) ---
         let exec_table = Table::execution();
         if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+            use sub_protocols::shout_binding;
+
             let exec_log_n = traces[&exec_table].log_n_rows;
             let r_air_exec = natural_ordering_point_for_session(&sumcheck_air_point.0, exec_log_n);
             let eq_r_exec = eval_eq(&r_air_exec);
@@ -475,69 +477,109 @@ pub fn prove_execution(
             let bytecode_table_size = 1usize << bytecode.log_size();
             let log_bytecode = bytecode.log_size();
             let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+            let n_bc_cols = bc_range.len();
 
-            prover_state.duplex();
-            let c_bc: EF = prover_state.sample();
             prover_state.duplex();
             let gamma_bc: EF = prover_state.sample();
-            prover_state.duplex();
-            let alpha_bc: EF = prover_state.sample();
 
-            let pushforward_bc = sub_protocols::bytecode_binding::compute_pushforward::<EF>(
-                pc_col, bytecode_table_size, &eq_r_exec,
-            );
+            // Step 1: Joint pushforward for bytecode
+            let p_joint_bc = shout_binding::compute_joint_pushforward(pc_col, bytecode_table_size, &eq_r_exec);
 
-            let batched_bytecode = sub_protocols::bytecode_binding::compute_batched_bytecode::<EF>(
+            // Step 2: Batch bytecode columns
+            let batched_bc = sub_protocols::bytecode_binding::compute_batched_bytecode::<EF>(
                 &bytecode.instructions_multilinear, bytecode_table_size,
-                bytecode_stride, bc_range.len(), &gamma_bc.powers().collect_n(bc_range.len()),
+                bytecode_stride, n_bc_cols, &gamma_bc.powers().collect_n(n_bc_cols),
             );
 
-            let batched_instr_val: EF = pushforward_bc.iter().zip(batched_bytecode.iter())
+            let batched_instr_val: EF = p_joint_bc.iter().zip(batched_bc.iter())
                 .map(|(&p, &b)| p * b).sum();
             let col_evals = &table_col_evals[&exec_table];
             let mut expected_bc_val = EF::ZERO;
             let mut gp_bc = EF::ONE;
-            for k in 0..bc_range.len() {
+            for k in 0..n_bc_cols {
                 expected_bc_val += gp_bc * col_evals[bc_range.start + k];
                 gp_bc *= gamma_bc;
             }
             debug_assert_eq!(batched_instr_val, expected_bc_val,
-                "bytecode batched_instr_val must match col_evals");
+                "Shout bytecode: batched_instr_val must match col_evals");
             prover_state.add_extension_scalar(batched_instr_val);
 
-            // Left combined GKR: α*<P_bc, batched_bytecode> + Σ P_bc/(c-j)
-            let bc_nums: Vec<EF> = (0..bytecode_table_size)
-                .map(|j| pushforward_bc[j] * (alpha_bc * batched_bytecode[j] * (c_bc - EF::from_usize(j)) + EF::ONE))
-                .collect();
-            let bc_dens: Vec<EF> = (0..bytecode_table_size)
-                .map(|j| c_bc - EF::from_usize(j))
-                .collect();
-            let pivot_bc = ENDIANNESS_PIVOT_GKR.min(log_bytecode);
-            let bc_nums_packed = pack_ef(&bc_nums);
-            let bc_dens_packed = pack_ef(&bc_dens);
-            let bc_nums_br = br_packed(&bc_nums_packed, pivot_bc);
-            let bc_dens_br = br_packed(&bc_dens_packed, pivot_bc);
-
+            // Step 3: Shout value sumcheck for bytecode
             prover_state.duplex();
-            let bc_left = prove_gkr_quotient_ext(&mut prover_state, &bc_nums_br, &bc_dens_br, pivot_bc);
+            let mut p_bc_fold = p_joint_bc;
+            let mut bc_mem_fold = batched_bc[..bytecode_table_size].to_vec();
+            let (_bc_endpoint, bc_s_point) = shout_binding::prove_shout_value_sumcheck(
+                &mut prover_state, &mut p_bc_fold, &mut bc_mem_fold, batched_instr_val,
+            );
 
-            // Right: trace side
-            let bc_right_nums: Vec<EF> = eq_r_exec.clone();
-            let bc_right_dens: Vec<EF> = pc_col.iter()
-                .map(|&pc| c_bc - EF::from(pc))
-                .collect();
+            // Step 4: Tensor decomposition for bytecode using PC_HI/PC_LO
+            let half_bits_bc = HALF_BITS_BC;
+            let bc_s_lo = &bc_s_point[..half_bits_bc];
+            let bc_s_hi = &bc_s_point[half_bits_bc..log_bytecode];
+
+            let pc_hi_col = &traces[&exec_table].columns[EXEC_COL_PC_HI];
+            let pc_lo_col = &traces[&exec_table].columns[EXEC_COL_PC_LO];
+            let n_exec_rows = 1usize << exec_log_n;
+
+            let (eq_hi_table, eq_lo_table) = shout_binding::build_eq_addr_tables(
+                &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
+                bc_s_hi, bc_s_lo, half_bits_bc,
+            );
+
+            let mut eq_r_bc_fold = eq_r_exec.clone();
+            let mut eq_hi_bc_fold = eq_hi_table;
+            let mut eq_lo_bc_fold = eq_lo_table;
+            let bc_pjoint_eval: EF = eq_r_bc_fold.iter()
+                .zip(eq_hi_bc_fold.iter()).zip(eq_lo_bc_fold.iter())
+                .map(|((&e, &h), &l)| e * h * l).sum();
+            prover_state.add_extension_scalar(bc_pjoint_eval);
+
+            let (_bc_hi_eval, _bc_lo_eval, bc_row_point) = shout_binding::prove_tensor_decomp_sumcheck(
+                &mut prover_state, &mut eq_r_bc_fold, &mut eq_hi_bc_fold, &mut eq_lo_bc_fold, bc_pjoint_eval,
+            );
+
+            // Step 5: d=2 pushforward + GKR for bytecode
+            let eq_bc_row_prime = eval_eq(&bc_row_point);
+            prover_state.duplex();
+            let beta_bc: EF = prover_state.sample();
+            let (p_bc_hi, p_bc_lo, p_bc_batched) = shout_binding::compute_d2_pushforward(
+                &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
+                &eq_bc_row_prime, half_bits_bc, beta_bc,
+            );
+            prover_state.add_extension_scalars(&p_bc_batched);
+
+            // GKR for bytecode pushforward well-formedness
+            let sqrt_bc = 1usize << half_bits_bc;
+            let bc_c_pf: EF = prover_state.sample();
+
+            let bc_left_nums: Vec<EF> = p_bc_batched.iter().map(|&p| -p).collect();
+            let bc_left_dens: Vec<EF> = (0..sqrt_bc).map(|h| bc_c_pf - EF::from_usize(h)).collect();
+            let pivot_bc_left = ENDIANNESS_PIVOT_GKR.min(half_bits_bc);
+            let bc_left_nums_packed = pack_ef(&bc_left_nums);
+            let bc_left_dens_packed = pack_ef(&bc_left_dens);
+            let bc_left_nums_br = br_packed(&bc_left_nums_packed, pivot_bc_left);
+            let bc_left_dens_br = br_packed(&bc_left_dens_packed, pivot_bc_left);
+            let bc_left = prove_gkr_quotient_ext(&mut prover_state, &bc_left_nums_br, &bc_left_dens_br, pivot_bc_left);
+
+            let bc_right_nums: Vec<EF> = (0..n_exec_rows).map(|i| {
+                let den_hi = bc_c_pf - EF::from(pc_hi_col[i]);
+                let den_lo = bc_c_pf - EF::from(pc_lo_col[i]);
+                eq_bc_row_prime[i] * den_lo + beta_bc * eq_bc_row_prime[i] * den_hi
+            }).collect();
+            let bc_right_dens: Vec<EF> = (0..n_exec_rows).map(|i| {
+                (bc_c_pf - EF::from(pc_hi_col[i])) * (bc_c_pf - EF::from(pc_lo_col[i]))
+            }).collect();
             let pivot_bc_right = ENDIANNESS_PIVOT_GKR.min(exec_log_n);
             let bc_right_nums_packed = pack_ef(&bc_right_nums);
             let bc_right_dens_packed = pack_ef(&bc_right_dens);
             let bc_right_nums_br = br_packed(&bc_right_nums_packed, pivot_bc_right);
             let bc_right_dens_br = br_packed(&bc_right_dens_packed, pivot_bc_right);
-
             let bc_right = prove_gkr_quotient_ext(
                 &mut prover_state, &bc_right_nums_br, &bc_right_dens_br, pivot_bc_right,
             );
 
-            debug_assert!((bc_left.0 - bc_right.0 - alpha_bc * batched_instr_val).is_zero(),
-                "bytecode combined GKR balance failed");
+            debug_assert!((bc_left.0 + bc_right.0).is_zero(),
+                "Shout bytecode pushforward GKR balance failed");
             prover_state.duplex();
         }
 
