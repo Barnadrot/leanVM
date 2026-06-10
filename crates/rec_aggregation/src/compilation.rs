@@ -428,6 +428,24 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
         "SKIP_LAGRANGE_C_PLACEHOLDER".to_string(),
         format!("[{}]", lagrange_c.join(", ")),
     );
+    // WHIR uniskip (pw13 h8): round-0 window identity is dot(coeffs, S_m) == claimed_sum with
+    // S_m = Σ_{j<2^K} j^m (0^0 = 1, so S_0 = 2^K). v' = f·w restricted to the window has degree
+    // ≤ 2(2^K−1), hence (2^K−1)·2 + 1 coefficients. Window/K/Lagrange constants are shared with
+    // the AIR skip (same integer window {0..2^K−1}).
+    let whir_skip_n_coeffs = (skip_window - 1) * 2 + 1;
+    let power_sums: Vec<String> = (0..whir_skip_n_coeffs)
+        .map(|m| {
+            let mut s = F::ZERO;
+            for j in 0..skip_window {
+                s += F::from_usize(j).exp_u64(m as u64);
+            }
+            s.as_canonical_u64().to_string()
+        })
+        .collect();
+    replacements.insert(
+        "WHIR_SKIP_POWER_SUMS_PLACEHOLDER".to_string(),
+        format!("[{}]", power_sums.join(", ")),
+    );
     replacements.insert(
         "N_AIR_COLUMNS_PLACEHOLDER".to_string(),
         format!("[{}]", n_air_columns.join(", ")),

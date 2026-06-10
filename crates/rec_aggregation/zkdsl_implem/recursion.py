@@ -481,7 +481,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     eval_weights: Mut
     final_value: Mut
     end_sum: Mut
-    fs, folding_randomness_global, eval_weights, final_value, end_sum = whir_open(
+    fs, folding_randomness_global, eval_weights, final_value, end_sum, whir_l16 = whir_open(
         fs,
         stacked_n_vars,
         whir_log_inv_rate,
@@ -491,61 +491,52 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         whir_sum,
     )
 
+    # h8 (WHIR uniskip): folding_randomness_global has stacked_n_vars − WHIR_SKIP_K + 1 entries:
+    # slot 0 = r0 (binding the first WHIR_SKIP_K variables via the Lagrange weights whir_l16),
+    # slot s ≥ 1 ↔ variable s + WHIR_SKIP_K − 1. Every base-statement weight below is the
+    # python spec's 16-term head sum Σ_j L16[j]·W(bits4(j) ∥ chal[1:]), in factored form: for
+    # boolean offset/selector bits the head sum collapses to indexing whir_l16, and for EF
+    # inner-point coords inside the head it is the MLE of the L16 table at those coords.
+    n_chal = stacked_n_vars - WHIR_SKIP_K + 1
+
     curr_randomness = combination_randomness_powers + num_ood_at_commitment * DIM
 
-    eq_memory_and_acc_point = poly_eq_extension_dynamic_ret(
-        folding_randomness_global + (stacked_n_vars - log_memory) * DIM,
-        memory_and_acc_point,
-        log_memory,
+    # Memory + acc statements (slice offsets 0 and 1 over a prefix that CAN overlap the head
+    # when stacked_n_vars − log_memory < WHIR_SKIP_K — handled inside whir_skip_slice_weight).
+    w_memory = whir_skip_slice_weight(
+        0, stacked_n_vars - log_memory, memory_and_acc_point, log_memory, folding_randomness_global, whir_l16
     )
-    prefix_memory = multilinear_location_prefix(0, stacked_n_vars - log_memory, folding_randomness_global)
-    eval_weights = add_extension_ret(
-        eval_weights,
-        mul_extension_ret(mul_extension_ret(curr_randomness, prefix_memory), eq_memory_and_acc_point),
-    )
+    eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, w_memory))
     curr_randomness += DIM
 
-    prefix_acc_memory = multilinear_location_prefix(1, stacked_n_vars - log_memory, folding_randomness_global)
-    eval_weights = add_extension_ret(
-        eval_weights,
-        mul_extension_ret(mul_extension_ret(curr_randomness, prefix_acc_memory), eq_memory_and_acc_point),
+    w_acc_memory = whir_skip_slice_weight(
+        1, stacked_n_vars - log_memory, memory_and_acc_point, log_memory, folding_randomness_global, whir_l16
     )
+    eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, w_acc_memory))
     curr_randomness += DIM
 
-    eq_pub_mem = Array(DIM)
-    poly_eq_ee(
-        folding_randomness_global + (stacked_n_vars - INNER_PUBLIC_MEMORY_LOG_SIZE) * DIM,
+    w_pub_mem = whir_skip_slice_weight(
+        0,
+        stacked_n_vars - INNER_PUBLIC_MEMORY_LOG_SIZE,
         public_memory_random_point,
-        eq_pub_mem,
         INNER_PUBLIC_MEMORY_LOG_SIZE,
+        folding_randomness_global,
+        whir_l16,
     )
-    prefix_pub_mem = multilinear_location_prefix(
-        0, stacked_n_vars - INNER_PUBLIC_MEMORY_LOG_SIZE, folding_randomness_global
-    )
-    eval_weights = add_extension_ret(
-        eval_weights,
-        mul_extension_ret(mul_extension_ret(curr_randomness, prefix_pub_mem), eq_pub_mem),
-    )
+    eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, w_pub_mem))
     curr_randomness += DIM
 
     bytecode_acc_layout_offset = two_exp(log_memory) * 2  # memory + acc_memory
 
-    eq_bytecode_acc = Array(DIM)
-    poly_eq_ee(
-        folding_randomness_global + (stacked_n_vars - LOG_GUEST_BYTECODE_LEN) * DIM,
-        bytecode_and_acc_point,
-        eq_bytecode_acc,
-        LOG_GUEST_BYTECODE_LEN,
-    )
-    prefix_bytecode_acc = multilinear_location_prefix(
+    w_bytecode_acc = whir_skip_slice_weight(
         bytecode_acc_layout_offset / 2**LOG_GUEST_BYTECODE_LEN,
         stacked_n_vars - LOG_GUEST_BYTECODE_LEN,
+        bytecode_and_acc_point,
+        LOG_GUEST_BYTECODE_LEN,
         folding_randomness_global,
+        whir_l16,
     )
-    eval_weights = add_extension_ret(
-        eval_weights,
-        mul_extension_ret(mul_extension_ret(curr_randomness, prefix_bytecode_acc), eq_bytecode_acc),
-    )
+    eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, w_bytecode_acc))
     curr_randomness += DIM
 
     for table_index in unroll(0, N_TABLES):
@@ -555,29 +546,36 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         table_offset = stacked_table_base_offset[table_index]
 
         if table_index == EXECUTION_TABLE_INDEX:
-            prefix_pc_start = multilinear_location_prefix(
+            prefix_pc_start = whir_skip_location_prefix(
                 table_offset + EXEC_COL_PC * two_exp(log_n_cycles),
                 stacked_n_vars,
                 folding_randomness_global,
+                whir_l16,
             )
             eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, prefix_pc_start))
             curr_randomness += DIM
 
-            prefix_pc_end = multilinear_location_prefix(
+            prefix_pc_end = whir_skip_location_prefix(
                 table_offset + (EXEC_COL_PC + 1) * two_exp(log_n_cycles) - 1,
                 stacked_n_vars,
                 folding_randomness_global,
+                whir_l16,
             )
             eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, prefix_pc_end))
             curr_randomness += DIM
 
-        column_prefixes = compute_column_prefixes(
+        # Table prefixes never overlap the head: stacked_n_vars ≥ log_n_rows + ceil(log2(n_cols))
+        # and every table has ≥ 20 columns ⇒ prefix ≥ 5 > WHIR_SKIP_K.
+        column_prefixes = compute_column_prefixes_skip(
             table_offset / n_rows,
             stacked_n_vars - log_n_rows,
             folding_randomness_global,
+            whir_l16,
             total_num_cols,
         )
-        inner_folding = folding_randomness_global + (stacked_n_vars - log_n_rows) * DIM
+        # h8: the last log_n_rows VARIABLES ↔ the last log_n_rows challenge slots (pure tensor
+        # region; the head never reaches the inner coords of table statements, see above).
+        inner_folding = folding_randomness_global + (n_chal - log_n_rows) * DIM
         n_shift_columns = N_AIR_SHIFT_COLUMNS[table_index]
 
         # LOGUP
@@ -621,6 +619,70 @@ def multilinear_location_prefix(offset, n_vars, point):
     return res
 
 
+# ---- h8 (WHIR uniskip) statement-weight helpers -------------------------------------------
+# The first WHIR_SKIP_K stacked variables are bound by ONE challenge r0; the python spec
+# evaluates every round-0 statement weight as Σ_j L16[j]·W(bits4(j) ∥ chal[1:]). These helpers
+# implement that head sum in factored form:
+#   · boolean (offset) head bits     → the sum collapses to selecting one L16 entry;
+#   · EF inner-point coords in head  → the sum is the MLE of the L16 table at those coords.
+
+
+def whir_skip_location_prefix(offset, n_vars, frg, l16):
+    # Skip-aware multilinear_location_prefix (requires n_vars ≥ WHIR_SKIP_K): the head's boolean
+    # offset bits select one Lagrange weight; the remaining bits pair with challenge slots 1...
+    debug_assert(WHIR_SKIP_K <= n_vars)
+    res = match_range(
+        n_vars,
+        range(WHIR_SKIP_K, 33),
+        lambda n: whir_skip_location_prefix_const(offset, n, frg, l16),
+    )
+    return res
+
+
+def whir_skip_location_prefix_const(offset, n_vars: Const, frg, l16):
+    bits = checked_decompose_bits_small_value_const(offset, n_vars)
+    head_idx: Mut = bits[WHIR_SKIP_K - 1]
+    for b in unroll(1, WHIR_SKIP_K):
+        head_idx += bits[WHIR_SKIP_K - 1 - b] * 2**b
+    rest = poly_eq_base_extension_or_one(bits + WHIR_SKIP_K, frg + DIM, n_vars - WHIR_SKIP_K)
+    return mul_extension_ret(l16 + head_idx * DIM, rest)
+
+
+def whir_skip_slice_weight(slice_offset, n_prefix, inner_point, n_inner, frg, l16):
+    # Weight of a base statement at slice offset `slice_offset` (global offset O·2^n_inner)
+    # whose inner weight is eq(inner_point, ·) over n_inner coords. Handles head-overlap shapes
+    # (n_prefix < WHIR_SKIP_K, e.g. memory/bytecode sections of large-memory proofs).
+    res = match_range(
+        n_prefix,
+        range(1, WHIR_SKIP_K),
+        lambda p: whir_skip_slice_weight_overlap(slice_offset, p, inner_point, n_inner, frg, l16),
+        range(WHIR_SKIP_K, 33),
+        lambda p: whir_skip_slice_weight_plain(slice_offset, p, inner_point, n_inner, frg, l16),
+    )
+    return res
+
+
+def whir_skip_slice_weight_overlap(slice_offset, n_prefix: Const, inner_point, n_inner, frg, l16):
+    # n_prefix < WHIR_SKIP_K: the boolean prefix bits select a contiguous bank of 2^d Lagrange
+    # weights (d = WHIR_SKIP_K − n_prefix); the first d inner coords pair with the remaining
+    # head bits: weight = [Σ_t L16[O·2^d + t]·eq(inner[0..d], bits_d(t))]·eq(inner[d..], chal[1..]).
+    d = WHIR_SKIP_K - n_prefix
+    head_tbl = compute_eq_mle_extension(inner_point, d)
+    head = dot_product_ee_ret(l16 + slice_offset * 2**d * DIM, head_tbl, 2**d)
+    tail = poly_eq_extension_dynamic_ret(inner_point + d * DIM, frg + DIM, n_inner - d)
+    return mul_extension_ret(head, tail)
+
+
+def whir_skip_slice_weight_plain(slice_offset, n_prefix: Const, inner_point, n_inner, frg, l16):
+    # n_prefix ≥ WHIR_SKIP_K: the whole head lies in the boolean location prefix; the inner
+    # point starts at variable n_prefix ↔ challenge slot n_prefix − WHIR_SKIP_K + 1.
+    prefix = whir_skip_location_prefix_const(slice_offset, n_prefix, frg, l16)
+    inner = poly_eq_extension_dynamic_ret(
+        frg + (n_prefix - WHIR_SKIP_K + 1) * DIM, inner_point, n_inner
+    )
+    return mul_extension_ret(prefix, inner)
+
+
 def compute_column_prefixes(first_col_offset, n_vars, point, n_cols: Const):
     K = log2_ceil(n_cols)
     debug_assert(0 < K)
@@ -649,6 +711,102 @@ def compute_column_prefixes(first_col_offset, n_vars, point, n_cols: Const):
         r += bits_first[n_vars - 1 - i] * 2**i
 
     # Column j lands at index r + j < 2^K + n_cols <= 2^(K+1).
+
+    return column_prefixes + r * DIM
+
+
+def compute_column_prefixes_skip(first_col_offset, n_vars, frg, l16, n_cols: Const):
+    # h8 skip-aware compute_column_prefixes: the head (first WHIR_SKIP_K prefix variables) is
+    # bound by r0, so every column's prefix factor selects one L16 entry by its boolean bits.
+    # Two regimes by where the head ends relative to the high/low (q/column-bits) split.
+    K = log2_ceil(n_cols)
+    debug_assert(0 < K)
+    debug_assert(K <= n_vars)
+    debug_assert(WHIR_SKIP_K <= n_vars)
+    high_n_vars = n_vars - K
+    res = match_range(
+        high_n_vars,
+        range(0, WHIR_SKIP_K),
+        lambda h: compute_column_prefixes_skip_overlap(first_col_offset, h, frg, l16, n_cols, K),
+        range(WHIR_SKIP_K, 33),
+        lambda h: compute_column_prefixes_skip_plain(first_col_offset, h, frg, l16, n_cols, K),
+    )
+    return res
+
+
+def compute_column_prefixes_skip_plain(first_col_offset, high_n_vars: Const, frg, l16, n_cols: Const, K: Const):
+    # Head fully inside the high (q) part: high factor = L16[top-K bits of q] · eq(q bits[K..], chal[1..]);
+    # low factor = eq table over the K column-bit variables ↔ challenge slots high−WHIR_SKIP_K+1...
+    n_vars = high_n_vars + K
+    low_eq = compute_eq_mle_extension(frg + (high_n_vars - WHIR_SKIP_K + 1) * DIM, K)
+
+    bits_first = checked_decompose_bits_small_value_const(first_col_offset, n_vars)
+    bits_last = checked_decompose_bits_small_value_const(first_col_offset + n_cols - 1, n_vars)
+    hidx_lo: Mut = bits_first[WHIR_SKIP_K - 1]
+    hidx_hi: Mut = bits_last[WHIR_SKIP_K - 1]
+    for b in unroll(1, WHIR_SKIP_K):
+        hidx_lo += bits_first[WHIR_SKIP_K - 1 - b] * 2**b
+        hidx_hi += bits_last[WHIR_SKIP_K - 1 - b] * 2**b
+    high_eq_lo = mul_extension_ret(
+        l16 + hidx_lo * DIM,
+        poly_eq_base_extension_or_one(bits_first + WHIR_SKIP_K, frg + DIM, high_n_vars - WHIR_SKIP_K),
+    )
+    high_eq_hi = mul_extension_ret(
+        l16 + hidx_hi * DIM,
+        poly_eq_base_extension_or_one(bits_last + WHIR_SKIP_K, frg + DIM, high_n_vars - WHIR_SKIP_K),
+    )
+
+    column_prefixes = Array(2 ** (K + 1) * DIM)
+    for w in unroll(0, 2**K):
+        mul_extension(high_eq_lo, low_eq + w * DIM, column_prefixes + w * DIM)
+        mul_extension(high_eq_hi, low_eq + w * DIM, column_prefixes + (2**K + w) * DIM)
+
+    r: Mut = bits_first[n_vars - 1]
+    for i in unroll(1, K):
+        r += bits_first[n_vars - 1 - i] * 2**i
+
+    return column_prefixes + r * DIM
+
+
+def compute_column_prefixes_skip_overlap(first_col_offset, high_n_vars: Const, frg, l16, n_cols: Const, K: Const):
+    # Head straddles the split: ALL q bits (high_n_vars < WHIR_SKIP_K of them) plus the top
+    # d2 = WHIR_SKIP_K − high_n_vars column-index bits are head bits. For column pattern w in
+    # bank q*: prefix = L16[q*·2^d2 + (w >> (K−d2))] · low_tbl[w mod 2^(K−d2)], where low_tbl is
+    # the eq table over the K−d2 column-bit variables ↔ challenge slots 1...
+    n_vars = high_n_vars + K
+    d2 = WHIR_SKIP_K - high_n_vars
+    low_tbl = compute_eq_mle_extension(frg + DIM, K - d2)
+
+    bits_first = checked_decompose_bits_small_value_const(first_col_offset, n_vars)
+    bits_last = checked_decompose_bits_small_value_const(first_col_offset + n_cols - 1, n_vars)
+    # q* as integers over the high_n_vars (possibly zero) high bits, MSB-first accumulation
+    # (empty loop ⇒ q = 0 when high_n_vars == 0; the q+1 bank is unreachable then).
+    q_lo: Mut = 0
+    q_hi: Mut = 0
+    for i in unroll(0, high_n_vars):
+        q_lo = q_lo * 2 + bits_first[i]
+        q_hi = q_hi * 2 + bits_last[i]
+
+    column_prefixes = Array(2 ** (K + 1) * DIM)
+    for w in unroll(0, 2**K):
+        w_top = div_floor(w, 2 ** (K - d2))
+        w_low = w - w_top * 2 ** (K - d2)
+        head_lo = q_lo * 2**d2 + w_top
+        head_hi = q_hi * 2**d2 + w_top
+        mul_extension(
+            l16 + head_lo * DIM,
+            low_tbl + w_low * DIM,
+            column_prefixes + w * DIM,
+        )
+        mul_extension(
+            l16 + head_hi * DIM,
+            low_tbl + w_low * DIM,
+            column_prefixes + (2**K + w) * DIM,
+        )
+
+    r: Mut = bits_first[n_vars - 1]
+    for i in unroll(1, K):
+        r += bits_first[n_vars - 1 - i] * 2**i
 
     return column_prefixes + r * DIM
 
