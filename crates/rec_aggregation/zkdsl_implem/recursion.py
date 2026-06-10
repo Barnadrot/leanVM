@@ -24,24 +24,24 @@ ONE_BUSES_DATA_COLS = ONE_BUSES_DATA_COLS_PLACEHOLDER  # [[[_; num_data]; num_bu
 ONE_BUSES_DATA_OFFSETS = ONE_BUSES_DATA_OFFSETS_PLACEHOLDER  # [[[_; num_data]; num_buses]; N_TABLES]
 ONE_BUSES_NEW_COLS = ONE_BUSES_NEW_COLS_PLACEHOLDER  # [[[_; n_new]; num_buses]; N_TABLES]
 
-NUM_COLS_AIR = NUM_COLS_AIR_PLACEHOLDER  # committed columns per table (used for stacked PCS layout)
-MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(N_AIR_COLUMNS[t]) — array stride for pcs_vals
+NUM_COLS_AIR = NUM_COLS_AIR_PLACEHOLDER
+MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(NUM_COLS_AIR[t] for t in 0..N_TABLES)
 ONE_BUSES_ALL_COLS = ONE_BUSES_ALL_COLS_PLACEHOLDER  # [[col, ...], _; N_TABLES] — sorted union of cols across all Multiplicity::One buses per table
-ONE_BUSES_COMMITTED_COLS = ONE_BUSES_COMMITTED_COLS_PLACEHOLDER  # [[col, ...]] — subset within n_committed_columns
 
-AIR_DEGREES = AIR_DEGREES_PLACEHOLDER  # [_; N_TABLES]
 MAX_AIR_FULL_DEGREE = MAX_AIR_FULL_DEGREE_PLACEHOLDER
-N_AIR_COLUMNS = N_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — total AIR columns (committed + virtual intermediates)
-N_COMMITTED_AIR_COLUMNS = N_COMMITTED_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — committed-only subset
+N_AIR_COLUMNS = N_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES]
 N_AIR_SHIFT_COLUMNS = N_AIR_SHIFT_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — by convention, shift column j of table t is column j
 AIR_ALPHA_OFFSETS = AIR_ALPHA_OFFSETS_PLACEHOLDER  # [_; N_TABLES], # AIR_ALPHA_OFFSETS[t] = sum(N_AIR_CONSTRAINTS[k] for k in range(t))
 
 N_INSTRUCTION_COLUMNS = N_INSTRUCTION_COLUMNS_PLACEHOLDER
-N_COMMITTED_EXEC_COLUMNS = N_COMMITTED_EXEC_COLUMNS_PLACEHOLDER
 
 LOG_GUEST_BYTECODE_LEN = LOG_GUEST_BYTECODE_LEN_PLACEHOLDER
 EXEC_COL_PC = COL_PC_PLACEHOLDER
 TOTAL_WHIR_STATEMENTS = TOTAL_WHIR_STATEMENTS_PLACEHOLDER
+STARTING_PC = STARTING_PC_PLACEHOLDER
+ENDING_PC = ENDING_PC_PLACEHOLDER
+
+# Shout binding constants
 N_MEM_BIND_GROUPS_PER_TABLE = N_MEM_BIND_GROUPS_PER_TABLE_PLACEHOLDER
 N_MEM_BIND_GROUPS_TOTAL = N_MEM_BIND_GROUPS_TOTAL_PLACEHOLDER
 N_MEM_BIND_VALUE_COLS_TOTAL = N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER
@@ -52,9 +52,12 @@ SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
 SQRT_K_BC = 2**HALF_BITS_BC
 PF_COMBINED_SIZE = SQRT_K_MEM + SQRT_K_BC
 PF_COMBINED_N_CHUNKS = div_ceil(PF_COMBINED_SIZE * DIM, DIGEST_LEN)
-STARTING_PC = STARTING_PC_PLACEHOLDER
-ENDING_PC = ENDING_PC_PLACEHOLDER
+N_COMMITTED_EXEC_COLUMNS = N_COMMITTED_EXEC_COLUMNS_PLACEHOLDER
+N_COMMITTED_AIR_COLUMNS = N_COMMITTED_AIR_COLUMNS_PLACEHOLDER
+ONE_BUSES_COMMITTED_COLS = ONE_BUSES_COMMITTED_COLS_PLACEHOLDER
+POSEIDON_TABLE_INDEX = 2
 
+# Poseidon GKR constants
 POS_INITIAL_RC_FLAT = POS_INITIAL_RC_FLAT_PLACEHOLDER
 POS_FINAL_RC_FLAT = POS_FINAL_RC_FLAT_PLACEHOLDER
 POS_FRC = POS_FRC_PLACEHOLDER
@@ -72,8 +75,11 @@ INNER_PUBLIC_MEMORY_LOG_SIZE = 3  # public input = 1 hash digest = 8 field eleme
 PUB_INPUT_SIZE = DIGEST_LEN  # the public input is a single digest
 
 
+# --- Poseidon GKR helper functions ---
+
 def pos_eq_at_point(a, b, n):
-    return poly_eq_extension_dynamic_ret(a, b, n)
+    res = poly_eq_extension_dynamic_ret(a, b, n)
+    return res
 
 
 def pos_mds_16(state_in, state_out):
@@ -81,7 +87,7 @@ def pos_mds_16(state_in, state_out):
         acc: Mut = ZERO_VEC_PTR
         for j in unroll(0, 16):
             acc = add_extension_ret(acc, mul_base_extension_ret(POS_MDS_FLAT[i * 16 + j], state_in + j * DIM))
-        copy_5(acc, state_out + i * DIM)
+        copy_ef(acc, state_out + i * DIM)
     return state_out
 
 
@@ -93,7 +99,7 @@ def pos_2_full_rounds_initial(state_in, pair: Const):
         s = add_base_extension_ret(POS_INITIAL_RC_FLAT[rc1_off + k], state_in + k * DIM)
         sq = mul_extension_ret(s, s)
         cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s1 + k * DIM)
+        copy_ef(cubed, s1 + k * DIM)
     s2 = Array(16 * DIM)
     _ = pos_mds_16(s1, s2)
     s3 = Array(16 * DIM)
@@ -101,29 +107,7 @@ def pos_2_full_rounds_initial(state_in, pair: Const):
         s = add_base_extension_ret(POS_INITIAL_RC_FLAT[rc2_off + k], s2 + k * DIM)
         sq = mul_extension_ret(s, s)
         cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s3 + k * DIM)
-    out = Array(16 * DIM)
-    _ = pos_mds_16(s3, out)
-    return out
-
-
-def pos_2_full_rounds_final(state_in, pair: Const):
-    rc1_off = pair * 32
-    rc2_off = pair * 32 + 16
-    s1 = Array(16 * DIM)
-    for k in unroll(0, 16):
-        s = add_base_extension_ret(POS_FINAL_RC_FLAT[rc1_off + k], state_in + k * DIM)
-        sq = mul_extension_ret(s, s)
-        cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s1 + k * DIM)
-    s2 = Array(16 * DIM)
-    _ = pos_mds_16(s1, s2)
-    s3 = Array(16 * DIM)
-    for k in unroll(0, 16):
-        s = add_base_extension_ret(POS_FINAL_RC_FLAT[rc2_off + k], s2 + k * DIM)
-        sq = mul_extension_ret(s, s)
-        cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s3 + k * DIM)
+        copy_ef(cubed, s3 + k * DIM)
     out = Array(16 * DIM)
     _ = pos_mds_16(s3, out)
     return out
@@ -136,7 +120,7 @@ def pos_single_full_round_initial(state_in, r_idx: Const):
         s = add_base_extension_ret(POS_INITIAL_RC_FLAT[rc_off + k], state_in + k * DIM)
         sq = mul_extension_ret(s, s)
         cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s1 + k * DIM)
+        copy_ef(cubed, s1 + k * DIM)
     out = Array(16 * DIM)
     _ = pos_mds_16(s1, out)
     return out
@@ -149,7 +133,7 @@ def pos_single_full_round_final(state_in, r_idx: Const):
         s = add_base_extension_ret(POS_FINAL_RC_FLAT[rc_off + k], state_in + k * DIM)
         sq = mul_extension_ret(s, s)
         cubed = mul_extension_ret(sq, s)
-        copy_5(cubed, s1 + k * DIM)
+        copy_ef(cubed, s1 + k * DIM)
     out = Array(16 * DIM)
     _ = pos_mds_16(s1, out)
     return out
@@ -159,27 +143,25 @@ def pos_linear_transition(state_in):
     frc_added = Array(16 * DIM)
     for k in unroll(0, 16):
         s = add_base_extension_ret(POS_FRC[k], state_in + k * DIM)
-        copy_5(s, frc_added + k * DIM)
+        copy_ef(s, frc_added + k * DIM)
     out = Array(16 * DIM)
     for k in unroll(0, 16):
         acc: Mut = ZERO_VEC_PTR
         for j in unroll(0, 16):
             acc = add_extension_ret(acc, mul_base_extension_ret(POS_M_I_FLAT[k * 16 + j], frc_added + j * DIM))
-        copy_5(acc, out + k * DIM)
+        copy_ef(acc, out + k * DIM)
     return out
 
 
 def pos_gkr_verify_endpoint(claimed, trans_out, eq_p_el, p_row, challenges, n_vars):
-    h_val: Mut = ZERO_VEC_PTR
-    for k in unroll(0, 16):
-        h_val = add_extension_ret(h_val, mul_extension_ret(eq_p_el + k * DIM, trans_out + k * DIM))
+    eq_p_el_eval = dot_product_ee_ret(trans_out, eq_p_el, 16)
     ch_rev = Array(n_vars * DIM)
     for i in range(0, n_vars):
-        copy_5(challenges + (n_vars - 1 - i) * DIM, ch_rev + i * DIM)
+        copy_ef(challenges + (n_vars - 1 - i) * DIM, ch_rev + i * DIM)
     eq_val = pos_eq_at_point(p_row, ch_rev, n_vars)
-    expected = mul_extension_ret(eq_val, h_val)
-    copy_5(claimed, expected)
-    return 0
+    expected = mul_extension_ret(eq_p_el_eval, eq_val)
+    copy_ef(expected, claimed)
+    return expected
 
 
 def recursion(inner_public_memory, initial_fiat_shamir_cap):
@@ -244,8 +226,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     n_buses_per_table = Array(N_TABLES) # indexed by table_index
     n_cols_per_table = Array(N_TABLES) # indexed by table_index
     for i in unroll(0, N_TABLES):
-        n_buses_per_table[i] = len(ONE_BUSES_DOMSEPS[i]) + 1 # + 1 for the precompile bus interraction (the rest is memory / bytecode interractions)
-        n_cols_per_table[i] = N_COMMITTED_AIR_COLUMNS[i]
+        n_buses_per_table[i] = len(ONE_BUSES_DOMSEPS[i]) + 1 # + 1 for the precompile bus interaction (the rest is memory / bytecode interactions)
+        n_cols_per_table[i] = NUM_COLS_AIR[i]
 
     gkr_table_base_offset = Array(N_TABLES)
     stacked_table_base_offset = Array(N_TABLES)
@@ -263,12 +245,12 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     num_ood_at_commitment = num_oods[0]
     fs, whir_base_root, whir_base_ood_points, whir_base_ood_evals = parse_commitment(fs, num_ood_at_commitment)
 
-    fs, logup_c = fs_sample_ef(fs)
+    fs, logup_gamma = fs_sample_ef(fs)
 
     fs = fs_duplex(fs)
-    fs, logup_alphas = fs_sample_many_ef(fs, log2_ceil(MAX_BUS_WIDTH))
+    fs, logup_beta = fs_sample_many_ef(fs, log2_ceil(MAX_BUS_WIDTH))
 
-    logup_alphas_eq_poly = compute_eq_mle_extension(logup_alphas, log2_ceil(MAX_BUS_WIDTH))
+    logup_beta_eq_poly = compute_eq_mle_extension(logup_beta, log2_ceil(MAX_BUS_WIDTH))
 
     # LOGUP
 
@@ -283,9 +265,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     retrieved_numerators_value: Mut = opposite_extension_ret(mul_extension_ret(memory_and_acc_prefix, value_acc))
 
     value_index = mle_of_01234567_etc(point_gkr + (n_vars_logup_gkr - log_memory) * DIM, log_memory)
-    fingerprint_memory = fingerprint_2(LOGUP_MEMORY_DOMAINSEP, value_index, value_memory, logup_alphas_eq_poly)
+    fingerprint_memory = fingerprint_2(LOGUP_MEMORY_DOMAINSEP, value_index, value_memory, logup_beta_eq_poly)
     retrieved_denominators_value: Mut = mul_extension_ret(
-        memory_and_acc_prefix, sub_extension_ret(logup_c, fingerprint_memory)
+        memory_and_acc_prefix, sub_extension_ret(logup_gamma, fingerprint_memory)
     )
 
     bytecode_section_offset = two_exp(log_memory)
@@ -301,7 +283,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     bytecode_claim = Array(BYTECODE_CLAIM_SIZE_PADDED)
     copy_many_ef(bytecode_and_acc_point, bytecode_claim, LOG_GUEST_BYTECODE_LEN)
     copy_many_ef(
-        logup_alphas + (log2_ceil(MAX_BUS_WIDTH) - log2_ceil(N_INSTRUCTION_COLUMNS)) * DIM,
+        logup_beta + (log2_ceil(MAX_BUS_WIDTH) - log2_ceil(N_INSTRUCTION_COLUMNS)) * DIM,
         bytecode_claim + LOG_GUEST_BYTECODE_LEN * DIM,
         log2_ceil(N_INSTRUCTION_COLUMNS),
     )
@@ -312,7 +294,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     bytecode_value_corrected: Mut = bytecode_value
     for i in unroll(0, log2_ceil(MAX_BUS_WIDTH) - log2_ceil(N_INSTRUCTION_COLUMNS)):
         bytecode_value_corrected = mul_extension_ret(
-            bytecode_value_corrected, one_minus_self_extension_ret(logup_alphas + i * DIM)
+            bytecode_value_corrected, one_minus_self_extension_ret(logup_beta + i * DIM)
         )
 
     fs, value_bytecode_acc = fs_receive_ef_inlined(fs, 1)
@@ -326,13 +308,13 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         mul_extension_ret(
             bytecode_multilinear_location_prefix,
             sub_extension_ret(
-                logup_c,
+                logup_gamma,
                 add_extension_ret(
                     bytecode_value_corrected,
                     add_extension_ret(
-                        mul_extension_ret(bytecode_index_value, logup_alphas_eq_poly + N_INSTRUCTION_COLUMNS * DIM),
+                        mul_extension_ret(bytecode_index_value, logup_beta_eq_poly + N_INSTRUCTION_COLUMNS * DIM),
                         mul_base_extension_ret(
-                            LOGUP_BYTECODE_DOMAINSEP, logup_alphas_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM
+                            LOGUP_BYTECODE_DOMAINSEP, logup_beta_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM
                         ),
                     ),
                 ),
@@ -380,8 +362,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             retrieved_denominators_value, mul_extension_ret(prefix, eval_on_data)
         )
 
-        copy_5(eval_on_selector, bus_numerators_values + table_index * DIM)
-        copy_5(eval_on_data, bus_denominators_values + table_index * DIM)
+        copy_ef(eval_on_selector, bus_numerators_values + table_index * DIM)
+        copy_ef(eval_on_data, bus_denominators_values + table_index * DIM)
 
         offset += n_rows
 
@@ -403,16 +385,16 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 data_ofs = ONE_BUSES_DATA_OFFSETS[table_index][one_bus_idx][i]
                 src = pcs_vals_logup[table_index * MAX_NUM_COLS_AIR + data_col]
                 if data_ofs == 0:
-                    copy_5(src, data_evals + i * DIM)
+                    copy_ef(src, data_evals + i * DIM)
                 if data_ofs != 0:
-                    copy_5(add_base_extension_ret(data_ofs, src), data_evals + i * DIM)
+                    copy_ef(add_base_extension_ret(data_ofs, src), data_evals + i * DIM)
 
             pref = multilinear_location_prefix(offset / n_rows, n_vars_logup_gkr - log_n_rows, point_gkr)
             retrieved_numerators_value = add_extension_ret(retrieved_numerators_value, pref)
-            fingerp = fingerprint_n(domsep, data_evals, n_data, logup_alphas_eq_poly)
+            fingerp = fingerprint_n(domsep, data_evals, n_data, logup_beta_eq_poly)
             retrieved_denominators_value = add_extension_ret(
                 retrieved_denominators_value,
-                mul_extension_ret(pref, sub_extension_ret(logup_c, fingerp)),
+                mul_extension_ret(pref, sub_extension_ret(logup_gamma, fingerp)),
             )
             offset += n_rows
 
@@ -422,8 +404,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         mle_of_zeros_then_ones(point_gkr, gkr_cumul, n_vars_logup_gkr),
     )
 
-    copy_5(retrieved_numerators_value, numerators_value)
-    copy_5(retrieved_denominators_value, denominators_value)
+    copy_ef(retrieved_numerators_value, numerators_value)
+    copy_ef(retrieved_denominators_value, denominators_value)
 
     memory_and_acc_point = point_gkr + (n_vars_logup_gkr - log_memory) * DIM
 
@@ -448,7 +430,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             bus_final_value,
             mul_extension_ret(
                 air_alpha_powers + (alpha_offset + 1) * DIM,
-                sub_extension_ret(logup_c, bus_denominator_value),
+                sub_extension_ret(logup_gamma, bus_denominator_value),
             ),
         )
         initial_sum = add_extension_ret(initial_sum, bus_final_value)
@@ -467,7 +449,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         fs, inner_evals = fs_receive_ef_inlined(fs, n_flat_columns + n_shift_columns)
 
         air_constraints_eval = evaluate_air_constraints(
-            table_index, inner_evals, air_alpha_powers + alpha_offset * DIM, logup_alphas_eq_poly
+            table_index, inner_evals, air_alpha_powers + alpha_offset * DIM, logup_beta_eq_poly
         )
 
         bus_point = pcs_inner_points[table_index]
@@ -487,15 +469,12 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 pcs_shifts_air[table_index * MAX_NUM_COLS_AIR + i] = evals_shift + i * DIM
 
     # verify that the AIR-batched sumcheck is valid
-    copy_5(check_sum, batched_air_final_value)
+    copy_ef(check_sum, batched_air_final_value)
 
-
-    # --- Post-AIR binding: Shout protocol (V-3 + V-4) ---
+    # --- Post-AIR: Shout binding (memory + bytecode) ---
     if N_MEM_BIND_GROUPS_TOTAL != 0:
-        # V-4: Memory-bound value columns
         fs = fs_duplex(fs)
         fs, bind_gamma = fs_sample_ef(fs)
-
         fs, bind_batched_val = fs_receive_ef_inlined(fs, 1)
 
         expected_batched_val: Mut = ZERO_VEC_PTR
@@ -506,63 +485,55 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 col_eval = pcs_vals_air[table_index * MAX_NUM_COLS_AIR + val_col]
                 expected_batched_val = add_extension_ret(expected_batched_val, mul_extension_ret(gamma_power, col_eval))
                 gamma_power = mul_extension_ret(gamma_power, bind_gamma)
-        copy_5(expected_batched_val, bind_batched_val)
+        copy_ef(expected_batched_val, bind_batched_val)
 
-        # Shout value sumcheck (degree 2, log_memory rounds)
         fs = fs_duplex(fs)
-        fs, _shout_challenges, _shout_endpoint = sumcheck_verify(fs, log_memory, bind_batched_val, 2)
+        fs, _shout_ch, _shout_ep = sumcheck_verify(fs, log_memory, bind_batched_val, 2)
 
-        # Per-table tensor decomp (store results for unified GKR)
+        half_bits = MEM_BIND_HALF_BITS_MAX
         for table_index in unroll(0, N_TABLES):
             if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
                 log_n_rows = table_log_heights[table_index]
                 fs, _table_contrib = fs_receive_ef_inlined(fs, 1)
-                fs, _td_challenges, _td_endpoint = sumcheck_verify(fs, log_n_rows, _table_contrib, 3)
+                fs, _td_ch, _td_ep = sumcheck_verify(fs, log_n_rows, _table_contrib, 3)
 
-        # V-3: Bytecode binding tensor decomp (before unified GKR)
-        fs = fs_duplex(fs)
-        fs, bc_gamma = fs_sample_ef(fs)
+    # Bytecode binding
+    fs = fs_duplex(fs)
+    fs, bc_gamma = fs_sample_ef(fs)
+    fs, bc_batched_val = fs_receive_ef_inlined(fs, 1)
 
-        fs, bc_batched_val = fs_receive_ef_inlined(fs, 1)
+    bc_expected: Mut = ZERO_VEC_PTR
+    bc_gp: Mut = ONE_EF_PTR
+    for ki in unroll(0, N_INSTRUCTION_COLUMNS):
+        col_eval = pcs_vals_air[EXECUTION_TABLE_INDEX * MAX_NUM_COLS_AIR + N_COMMITTED_EXEC_COLUMNS + ki]
+        bc_expected = add_extension_ret(bc_expected, mul_extension_ret(bc_gp, col_eval))
+        bc_gp = mul_extension_ret(bc_gp, bc_gamma)
+    copy_ef(bc_expected, bc_batched_val)
 
-        bc_expected: Mut = ZERO_VEC_PTR
-        bc_gp: Mut = ONE_EF_PTR
-        for ki in unroll(0, N_INSTRUCTION_COLUMNS):
-            col_eval = pcs_vals_air[EXECUTION_TABLE_INDEX * MAX_NUM_COLS_AIR + N_COMMITTED_EXEC_COLUMNS + ki]
-            bc_expected = add_extension_ret(bc_expected, mul_extension_ret(bc_gp, col_eval))
-            bc_gp = mul_extension_ret(bc_gp, bc_gamma)
-        copy_5(bc_expected, bc_batched_val)
+    fs = fs_duplex(fs)
+    fs, _bc_shout_ch, _bc_shout_ep = sumcheck_verify(fs, LOG_GUEST_BYTECODE_LEN, bc_batched_val, 2)
+    fs, _bc_pjoint = fs_receive_ef_inlined(fs, 1)
+    fs, _bc_td_ch, _bc_td_ep = sumcheck_verify(fs, log_n_cycles, _bc_pjoint, 3)
 
-        fs = fs_duplex(fs)
-        fs, _bc_shout_ch, _bc_shout_ep = sumcheck_verify(fs, LOG_GUEST_BYTECODE_LEN, bc_batched_val, 2)
+    # Unified binding GKR (ONE for all binding)
+    fs = fs_duplex(fs)
+    fs, _alpha_sel = fs_sample_ef(fs)
+    fs, _combined_pf = fs_receive_ef_runtime(fs, PF_COMBINED_SIZE, PF_COMBINED_N_CHUNKS)
+    fs, _c_pf = fs_sample_ef(fs)
 
-        fs, _bc_pjoint_eval = fs_receive_ef_inlined(fs, 1)
-        fs, _bc_td_ch, _bc_td_ep = sumcheck_verify(fs, log_n_cycles, _bc_pjoint_eval, 3)
+    total_trace_rows: Mut = 0
+    for table_index in unroll(0, N_TABLES):
+        if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
+            total_trace_rows = total_trace_rows + 2 * table_heights[table_index]
+    total_trace_rows = total_trace_rows + 2 * two_exp(log_n_cycles)
+    log_combined = log2_ceil_runtime(PF_COMBINED_SIZE + total_trace_rows)
+    fs, gkr_q, _, _, _ = verify_gkr_quotient(fs, log_combined)
+    set_to_5_zeros(gkr_q)
+    fs = fs_duplex(fs)
 
-        # --- Unified binding GKR: ONE alpha, ONE pushforward, ONE c_pf, ONE GKR ---
-        fs = fs_duplex(fs)
-        fs, _alpha_sel = fs_sample_ef(fs)
-
-        # Receive ONE combined pushforward [P_mem | P_bc]
-        fs, _combined_pf = fs_receive_ef_runtime(fs, PF_COMBINED_SIZE, PF_COMBINED_N_CHUNKS)
-
-        fs, _c_pf = fs_sample_ef(fs)
-
-        # Compute log_combined for the unified GKR
-        # total_trace = 2*n_exec + 2*Σ(n_rows for mem-bound tables)
-        total_trace_rows: Mut = 2 * two_exp(log_n_cycles)
-        for table_index in unroll(0, N_TABLES):
-            if N_MEM_BIND_GROUPS_PER_TABLE[table_index] != 0:
-                total_trace_rows = total_trace_rows + 2 * table_heights[table_index]
-        log_combined = log2_ceil_runtime(PF_COMBINED_SIZE + total_trace_rows)
-        fs, gkr_q, _, _, _ = verify_gkr_quotient(fs, log_combined)
-        set_to_5_zeros(gkr_q)
-
-        fs = fs_duplex(fs)
-
-    # Phase 3: Poseidon GKR — 29 transitions with SplitEq (bare degree 3)
-    POSEIDON_TABLE_INDEX = 2
-    poseidon_log_n = table_log_heights[POSEIDON_TABLE_INDEX]
+    # --- Poseidon GKR (Finding 1) — 29 transitions with SplitEq ---
+    POSEIDON_TABLE_IDX = 2
+    poseidon_log_n = table_log_heights[POSEIDON_TABLE_IDX]
     fs = fs_duplex(fs)
     fs, pos_p_el = fs_sample_many_ef(fs, 4)
     fs = fs_duplex(fs)
@@ -572,7 +543,6 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_claimed: Mut
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
 
-    # t=28: ending full round 3 (final_rc[3]), degree 4
     sc_ch: Mut
     sc_cl: Mut
     ie: Mut
@@ -580,6 +550,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     alpha: Mut
     rev: Mut
     pos_p_row_tmp: Mut
+
+    # t=28: ending full round 3
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
     fs, ie = fs_receive_ef_inlined(fs, 16)
     out = pos_single_full_round_final(ie, 3)
@@ -589,10 +561,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     pos_p_row_tmp = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
+        copy_ef(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
     pos_p_row = pos_p_row_tmp
 
-    # t=27: ending full round 2 (final_rc[2]), degree 4
+    # t=27: ending full round 2
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
     fs, ie = fs_receive_ef_inlined(fs, 16)
@@ -603,10 +575,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     pos_p_row_tmp = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
+        copy_ef(sc_ch + (poseidon_log_n - 1 - i) * DIM, pos_p_row_tmp + i * DIM)
     pos_p_row = pos_p_row_tmp
 
-    # t=26: ending full round 1 (final_rc[1]), degree 4
+    # t=26: ending full round 1
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
     fs, ie = fs_receive_ef_inlined(fs, 16)
@@ -617,10 +589,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     rev = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+        copy_ef(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
     pos_p_row = rev
 
-    # t=25: ending full round 0 (final_rc[0]), degree 4
+    # t=25: ending full round 0
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
     fs, ie = fs_receive_ef_inlined(fs, 16)
@@ -631,10 +603,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     rev = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+        copy_ef(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
     pos_p_row = rev
 
-    # t=24..5: 20 partial rounds (reverse), degree 4
+    # t=24..5: 20 partial rounds (reverse)
     for pr_idx in unroll(0, 20):
         fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
         fs, sc_ch_pr, sc_cl_pr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
@@ -651,20 +623,20 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 pr_src = pr_cubed
             pr_new_s0 = add_extension_ret(pr_new_s0, mul_base_extension_ret(POS_FIRST_ROWS_FLAT[(19 - pr_idx) * 16 + j], pr_src))
         pr_out = Array(16 * DIM)
-        copy_5(pr_new_s0, pr_out)
+        copy_ef(pr_new_s0, pr_out)
         for j in unroll(1, 16):
             pr_updated = add_extension_ret(ie_pr + j * DIM, mul_base_extension_ret(POS_V_VECS_FLAT[(19 - pr_idx) * 16 + j - 1], pr_old_s0))
-            copy_5(pr_updated, pr_out + j * DIM)
+            copy_ef(pr_updated, pr_out + j * DIM)
         _ = pos_gkr_verify_endpoint(sc_cl_pr, pr_out, pos_eq_p_el, pos_p_row, sc_ch_pr, poseidon_log_n)
         fs = fs_duplex(fs)
         fs, alpha_pr = fs_sample_many_ef(fs, 4)
         pos_eq_p_el = compute_eq_mle_extension(alpha_pr, 4)
         pr_rev = Array(poseidon_log_n * DIM)
         for i in range(0, poseidon_log_n):
-            copy_5(sc_ch_pr + (poseidon_log_n - 1 - i) * DIM, pr_rev + i * DIM)
+            copy_ef(sc_ch_pr + (poseidon_log_n - 1 - i) * DIM, pr_rev + i * DIM)
         pos_p_row = pr_rev
 
-    # t=4: linear transition, degree 2
+    # t=4: linear transition
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch, sc_cl = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 2)
     fs, ie = fs_receive_ef_inlined(fs, 16)
@@ -675,11 +647,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha, 4)
     rev = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
+        copy_ef(sc_ch + (poseidon_log_n - 1 - i) * DIM, rev + i * DIM)
     pos_p_row = rev
 
-    # t=3..0: 4 beginning full rounds (reverse), degree 4
-    # Iterations 0..2: beginning full rounds 3,2,1
+    # t=3..1: beginning full rounds 3,2,1
     for fr_idx in unroll(0, 3):
         fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
         fs, sc_ch_fr, sc_cl_fr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
@@ -697,10 +668,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         pos_eq_p_el = compute_eq_mle_extension(alpha_fr, 4)
         fr_rev = Array(poseidon_log_n * DIM)
         for i in range(0, poseidon_log_n):
-            copy_5(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
+            copy_ef(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
         pos_p_row = fr_rev
 
-    # Iteration 3 (final): beginning full round 0 — captures GKR input evals
+    # t=0: final beginning full round — extract pos_gkr_input_evals
     fs, pos_claimed = fs_receive_ef_inlined(fs, 1)
     fs, sc_ch_fr, sc_cl_fr = sumcheck_verify(fs, poseidon_log_n, pos_claimed, 4)
     fs, pos_gkr_input_evals = fs_receive_ef_inlined(fs, 16)
@@ -711,13 +682,13 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     pos_eq_p_el = compute_eq_mle_extension(alpha_fr, 4)
     fr_rev = Array(poseidon_log_n * DIM)
     for i in range(0, poseidon_log_n):
-        copy_5(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
+        copy_ef(sc_ch_fr + (poseidon_log_n - 1 - i) * DIM, fr_rev + i * DIM)
     pos_p_row = fr_rev
 
-    # GKR endpoint: pos_gkr_input_evals + pos_p_row become WHIR claims
     pos_gkr_final_point = pos_p_row
     fs = fs_duplex(fs)
 
+    # --- Public memory evaluation ---
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
     poly_eq_public_mem = compute_eq_mle_extension(public_memory_random_point, INNER_PUBLIC_MEMORY_LOG_SIZE)
     public_memory_eval = Array(DIM)
@@ -742,6 +713,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     curr_randomness += DIM
     whir_sum = add_extension_ret(mul_extension_ret(value_bytecode_acc, curr_randomness), whir_sum)
     curr_randomness += DIM
+
     for table_index in unroll(0, N_TABLES):
         if table_index == EXECUTION_TABLE_INDEX:
             whir_sum = add_extension_ret(mul_extension_ret(embed_in_ef(STARTING_PC), curr_randomness), whir_sum)
@@ -749,7 +721,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             whir_sum = add_extension_ret(mul_extension_ret(embed_in_ef(ENDING_PC), curr_randomness), whir_sum)
             curr_randomness += DIM
 
-        # LOGUP (only committed columns contribute to WHIR claims)
+        # LOGUP (committed cols only)
         for k in unroll(0, len(ONE_BUSES_COMMITTED_COLS[table_index])):
             col = ONE_BUSES_COMMITTED_COLS[table_index][k]
             whir_sum = add_extension_ret(
@@ -758,7 +730,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             )
             curr_randomness += DIM
 
-        # AIR
+        # AIR (committed cols only)
         for j in unroll(0, N_AIR_SHIFT_COLUMNS[table_index]):
             whir_sum = add_extension_ret(
                 mul_extension_ret(pcs_shifts_air[table_index * MAX_NUM_COLS_AIR + j], curr_randomness),
@@ -782,10 +754,10 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 curr_randomness += DIM
 
     folding_randomness_global: Mut
-    s: Mut
+    eval_weights: Mut
     final_value: Mut
     end_sum: Mut
-    fs, folding_randomness_global, s, final_value, end_sum = whir_open(
+    fs, folding_randomness_global, eval_weights, final_value, end_sum = whir_open(
         fs,
         stacked_n_vars,
         whir_log_inv_rate,
@@ -803,15 +775,15 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         log_memory,
     )
     prefix_memory = multilinear_location_prefix(0, stacked_n_vars - log_memory, folding_randomness_global)
-    s = add_extension_ret(
-        s,
+    eval_weights = add_extension_ret(
+        eval_weights,
         mul_extension_ret(mul_extension_ret(curr_randomness, prefix_memory), eq_memory_and_acc_point),
     )
     curr_randomness += DIM
 
     prefix_acc_memory = multilinear_location_prefix(1, stacked_n_vars - log_memory, folding_randomness_global)
-    s = add_extension_ret(
-        s,
+    eval_weights = add_extension_ret(
+        eval_weights,
         mul_extension_ret(mul_extension_ret(curr_randomness, prefix_acc_memory), eq_memory_and_acc_point),
     )
     curr_randomness += DIM
@@ -826,8 +798,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     prefix_pub_mem = multilinear_location_prefix(
         0, stacked_n_vars - INNER_PUBLIC_MEMORY_LOG_SIZE, folding_randomness_global
     )
-    s = add_extension_ret(
-        s,
+    eval_weights = add_extension_ret(
+        eval_weights,
         mul_extension_ret(mul_extension_ret(curr_randomness, prefix_pub_mem), eq_pub_mem),
     )
     curr_randomness += DIM
@@ -846,8 +818,8 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         stacked_n_vars - LOG_GUEST_BYTECODE_LEN,
         folding_randomness_global,
     )
-    s = add_extension_ret(
-        s,
+    eval_weights = add_extension_ret(
+        eval_weights,
         mul_extension_ret(mul_extension_ret(curr_randomness, prefix_bytecode_acc), eq_bytecode_acc),
     )
     curr_randomness += DIM
@@ -855,7 +827,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]
         n_rows = table_heights[table_index]
-        total_num_cols = N_COMMITTED_AIR_COLUMNS[table_index]
+        total_num_cols = NUM_COLS_AIR[table_index]
         table_offset = stacked_table_base_offset[table_index]
 
         if table_index == EXECUTION_TABLE_INDEX:
@@ -864,7 +836,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 stacked_n_vars,
                 folding_randomness_global,
             )
-            s = add_extension_ret(s, mul_extension_ret(curr_randomness, prefix_pc_start))
+            eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, prefix_pc_start))
             curr_randomness += DIM
 
             prefix_pc_end = multilinear_location_prefix(
@@ -872,7 +844,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
                 stacked_n_vars,
                 folding_randomness_global,
             )
-            s = add_extension_ret(s, mul_extension_ret(curr_randomness, prefix_pc_end))
+            eval_weights = add_extension_ret(eval_weights, mul_extension_ret(curr_randomness, prefix_pc_end))
             curr_randomness += DIM
 
         column_prefixes = compute_column_prefixes(
@@ -885,37 +857,27 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         n_shift_columns = N_AIR_SHIFT_COLUMNS[table_index]
 
         # LOGUP
-        point_logup = pcs_inner_points[table_index]
-        eq_factor_logup = poly_eq_extension_dynamic_ret(point_logup, inner_folding, log_n_rows)
+        eq_factor_logup = poly_eq_extension_dynamic_ret(pcs_inner_points[table_index], inner_folding, log_n_rows)
+        logup_acc: Mut = ZERO_VEC_PTR
         for k in unroll(0, len(ONE_BUSES_COMMITTED_COLS[table_index])):
             col = ONE_BUSES_COMMITTED_COLS[table_index][k]
             prefix = column_prefixes + col * DIM
-            s = add_extension_ret(
-                s,
-                mul_extension_ret(mul_extension_ret(curr_randomness, prefix), eq_factor_logup),
-            )
+            logup_acc = add_extension_ret(logup_acc, mul_extension_ret(curr_randomness, prefix))
             curr_randomness += DIM
+        eval_weights = add_extension_ret(eval_weights, mul_extension_ret(logup_acc, eq_factor_logup))
 
         # AIR
         if n_shift_columns != 0:
             next_factor = next_mle(all_challenges, inner_folding, log_n_rows)
-            for j in unroll(0, n_shift_columns):
-                prefix = column_prefixes + j * DIM
-                s = add_extension_ret(
-                    s,
-                    mul_extension_ret(mul_extension_ret(curr_randomness, prefix), next_factor),
-                )
-                curr_randomness += DIM
+            shift_sum = dot_product_ee_ret(curr_randomness, column_prefixes, n_shift_columns)
+            eval_weights = add_extension_ret(eval_weights, mul_extension_ret(shift_sum, next_factor))
+            curr_randomness += n_shift_columns * DIM
         eq_factor_air = poly_eq_extension_dynamic_ret(all_challenges, inner_folding, log_n_rows)
-        for j in unroll(0, N_COMMITTED_AIR_COLUMNS[table_index]):
-            prefix = column_prefixes + j * DIM
-            s = add_extension_ret(
-                s,
-                mul_extension_ret(mul_extension_ret(curr_randomness, prefix), eq_factor_air),
-            )
-            curr_randomness += DIM
+        air_sum = dot_product_ee_ret(curr_randomness, column_prefixes, N_COMMITTED_AIR_COLUMNS[table_index])
+        eval_weights = add_extension_ret(eval_weights, mul_extension_ret(air_sum, eq_factor_air))
+        curr_randomness += N_COMMITTED_AIR_COLUMNS[table_index] * DIM
 
-    # Poseidon GKR endpoint: 16 input columns at pos_gkr_final_point
+    # Poseidon GKR endpoint: 16 input columns at pos_gkr_final_point (Finding 1)
     POSEIDON_TABLE_IDX_GKR = 2
     pos_log_n_gkr = table_log_heights[POSEIDON_TABLE_IDX_GKR]
     pos_n_rows_gkr = table_heights[POSEIDON_TABLE_IDX_GKR]
@@ -929,16 +891,16 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     )
     pos_inner_fold = folding_randomness_global + (stacked_n_vars - pos_log_n_gkr) * DIM
     eq_factor_gkr = poly_eq_extension_dynamic_ret(pos_gkr_final_point, pos_inner_fold, pos_log_n_gkr)
-    POSEIDON_INPUT_COL_START = 11  # After NU_C_HI(9), NU_C_LO(10)
+    POSEIDON_INPUT_COL_START = 12
     for k in unroll(0, 16):
         prefix = pos_gkr_col_prefixes + (POSEIDON_INPUT_COL_START + k) * DIM
-        s = add_extension_ret(
-            s,
+        eval_weights = add_extension_ret(
+            eval_weights,
             mul_extension_ret(mul_extension_ret(curr_randomness, prefix), eq_factor_gkr),
         )
         curr_randomness += DIM
 
-    copy_5(mul_extension_ret(s, final_value), end_sum)
+    copy_ef(mul_extension_ret(eval_weights, final_value), end_sum)
 
     return bytecode_claim
 
@@ -981,23 +943,23 @@ def compute_column_prefixes(first_col_offset, n_vars, point, n_cols: Const):
     return column_prefixes + r * DIM
 
 
-def fingerprint_2(table_index, data_1, data_2, logup_alphas_eq_poly):
+def fingerprint_2(table_index, data_1, data_2, logup_beta_eq_poly):
     buff = Array(DIM * 2)
-    copy_5(data_1, buff)
-    copy_5(data_2, buff + DIM)
-    res: Mut = dot_product_ee_ret(buff, logup_alphas_eq_poly, 2)
+    copy_ef(data_1, buff)
+    copy_ef(data_2, buff + DIM)
+    res: Mut = dot_product_ee_ret(buff, logup_beta_eq_poly, 2)
     res = add_extension_ret(
-        res, mul_base_extension_ret(table_index, logup_alphas_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM)
+        res, mul_base_extension_ret(table_index, logup_beta_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM)
     )
     return res
 
 
 @inline
-def fingerprint_n(domsep, data_evals, n, logup_alphas_eq_poly):
-    res: Mut = dot_product_ee_ret(data_evals, logup_alphas_eq_poly, n)
+def fingerprint_n(domsep, data_evals, n, logup_beta_eq_poly):
+    res: Mut = dot_product_ee_ret(data_evals, logup_beta_eq_poly, n)
     res = add_extension_ret(
         res,
-        mul_base_extension_ret(domsep, logup_alphas_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM),
+        mul_base_extension_ret(domsep, logup_beta_eq_poly + (2 ** log2_ceil(MAX_BUS_WIDTH) - 1) * DIM),
     )
     return res
 
@@ -1087,7 +1049,7 @@ def compute_stacked_n_vars(log_memory, log_bytecode_padded, tables_heights):
     total += two_exp(log_bytecode_padded)
     for table_index in unroll(0, N_TABLES):
         n_rows = tables_heights[table_index]
-        total += n_rows * N_COMMITTED_AIR_COLUMNS[table_index]
+        total += n_rows * NUM_COLS_AIR[table_index]
     debug_assert(30 - 24 < MIN_LOG_N_ROWS_PER_TABLE)  # cf log2_ceil
     return MIN_LOG_N_ROWS_PER_TABLE + log2_ceil_runtime(total / 2**MIN_LOG_N_ROWS_PER_TABLE)
 
@@ -1103,16 +1065,16 @@ def compute_total_gkr_n_vars(log_memory, log_bytecode_padded, tables_heights):
     return log2_ceil_runtime(total)
 
 
-def evaluate_air_constraints(table_index, inner_evals, air_alpha_powers, logup_alphas_eq_poly):
+def evaluate_air_constraints(table_index, inner_evals, air_alpha_powers, logup_beta_eq_poly):
     res: Imm
     debug_assert(table_index < N_TABLES)
     match table_index:
         case 0:
-            res = evaluate_air_constraints_table_0(inner_evals, air_alpha_powers, logup_alphas_eq_poly)
+            res = evaluate_air_constraints_table_0(inner_evals, air_alpha_powers, logup_beta_eq_poly)
         case 1:
-            res = evaluate_air_constraints_table_1(inner_evals, air_alpha_powers, logup_alphas_eq_poly)
+            res = evaluate_air_constraints_table_1(inner_evals, air_alpha_powers, logup_beta_eq_poly)
         case 2:
-            res = evaluate_air_constraints_table_2(inner_evals, air_alpha_powers, logup_alphas_eq_poly)
+            res = evaluate_air_constraints_table_2(inner_evals, air_alpha_powers, logup_beta_eq_poly)
     return res
 
 

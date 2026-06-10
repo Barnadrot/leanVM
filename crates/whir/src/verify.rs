@@ -212,12 +212,19 @@ where
         constraints: &[SparseStatement<EF>],
     ) -> ProofResult<Vec<EF>> {
         let combination_randomness_gen: EF = verifier_state.sample();
+        static PRINT_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let do_print = !PRINT_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed);
         let mut combination_randomness = vec![EF::ONE];
+        let mut _vidx = 0usize;
         for smt in constraints {
             for e in &smt.values {
                 let combination_randomness_pow = *combination_randomness.last().unwrap();
+                if do_print && _vidx >= 65 && _vidx < 85 {
+                    eprintln!("[W] i={_vidx} v={}", e.value.as_basis_coefficients_slice()[0]);
+                }
                 *claimed_sum += combination_randomness_pow * e.value;
                 combination_randomness.push(combination_randomness_pow * combination_randomness_gen);
+                _vidx += 1;
             }
         }
         combination_randomness.pop().unwrap();

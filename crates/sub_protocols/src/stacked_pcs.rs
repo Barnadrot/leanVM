@@ -58,7 +58,9 @@ pub fn stacked_pcs_global_statements(
     }
 
     let mut global_statements = previous_statements;
+    eprintln!("[stacked] prev_stmts={}", global_statements.len());
     for table in ALL_TABLES {
+        let before = global_statements.len();
         let n_vars = tables_heights[&table];
         let offset = table_offsets[&table];
         if table.is_execution_table() {
@@ -93,6 +95,9 @@ pub fn stacked_pcs_global_statements(
                 global_statements.push(SparseStatement::new(stacked_n_vars, point.clone(), committed_eq));
             }
         }
+        let added = global_statements.len() - before;
+        let vals: usize = global_statements[before..].iter().map(|s| s.values.len()).sum();
+        eprintln!("[stacked] table={} stmts={added} vals={vals} n_committed={n_committed} entries={}", table.name(), committed_statements[&table].len());
     }
     global_statements
 }
