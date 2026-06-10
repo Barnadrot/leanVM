@@ -348,16 +348,21 @@ pub fn prove_execution(
                 &mut prover_state, &mut p_joint_fold, &mut mem_ef, claimed_sum,
             );
 
-            // Step 4: Tensor decomposition sumcheck per table
+            // Step 4: Tensor decomposition sumcheck per table + unified GKR
             eprintln!("    step3 shout_sumcheck: {:.0}ms", _t2.elapsed().as_secs_f64() * 1000.0);
             let _t3 = std::time::Instant::now();
-            // Split s into (s_lo, s_hi) for d=2 decomposition
             let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
             let s_lo = &s_point[..half_bits];
             let s_hi = &s_point[half_bits..log_memory];
 
-            // P_joint_tilde(s) = Σ_table table_contrib(s)
-            // For each table: tensor decomp → Section 4.1 concatenated pushforward → ONE GKR
+            // Per-table tensor decomp — store results for unified GKR
+            struct TableDecomp<'a> {
+                eq_row_prime: Vec<EF>,
+                addr_col: &'a [F],
+                n_rows: usize,
+                half_bits: usize,
+            }
+            let mut mem_decomps: Vec<TableDecomp<'_>> = Vec::new();
 
             for (table, groups) in &all_groups {
                 let trace = &traces[table];
@@ -365,112 +370,218 @@ pub fn prove_execution(
                 let log_n = trace.log_n_rows;
                 let n_rows = 1usize << log_n;
 
-                // Build combined eq_addr tables weighted by gamma across groups
                 let mut combined_eq_hi = EF::zero_vec(n_rows);
                 let mut combined_eq_lo = EF::zero_vec(n_rows);
-                let mut gp = EF::ONE; // track gamma power for this table's groups
-                // Find this table's gamma offset
                 let mut table_gamma_offset = EF::ONE;
-                let mut found = false;
                 let mut gp_scan = EF::ONE;
                 for (t, gs) in &all_groups {
-                    if *t == *table { table_gamma_offset = gp_scan; found = true; break; }
+                    if *t == *table { table_gamma_offset = gp_scan; break; }
                     for g in gs { for _ in 0..g.value_cols.len() { gp_scan *= gamma; } }
                 }
-                assert!(found);
-                gp = table_gamma_offset;
+                let mut gp = table_gamma_offset;
 
                 for group in groups {
                     let addr_col = &trace.columns[group.addr_col];
-                    // Find hi/lo columns for this group's addr
-                    let memory_bounds = table.memory_bound_columns();
-                    // addr_hi/lo columns depend on the table structure
-                    // For extension: COL_IDX_X_HI/LO, for poseidon: POSEIDON_COL_NU_C_HI/LO
-                    // We need to map group.addr_col to its hi/lo columns
-                    // TODO: this mapping needs to come from the table trait
-
+                    let half_bits_mask = (1 << half_bits) - 1;
                     for k in 0..group.value_cols.len() {
-                        for i in 0..n_rows {
+                        let eq_pairs: Vec<(EF, EF)> = (0..n_rows).into_par_iter().map(|i| {
                             let addr_val = addr_col[i].to_usize() + k;
                             let hi = addr_val >> half_bits;
-                            let lo = addr_val & ((1 << half_bits) - 1);
+                            let lo = addr_val & half_bits_mask;
                             let eq_hi = shout_binding::eq_bits_at_point(F::from_usize(hi), s_hi, half_bits);
                             let eq_lo = shout_binding::eq_bits_at_point(F::from_usize(lo), s_lo, half_bits);
-                            combined_eq_hi[i] += gp * eq_hi;
-                            combined_eq_lo[i] += gp * eq_lo;
+                            (eq_hi, eq_lo)
+                        }).collect();
+                        for i in 0..n_rows {
+                            combined_eq_hi[i] += gp * eq_pairs[i].0;
+                            combined_eq_lo[i] += gp * eq_pairs[i].1;
                         }
                         gp *= gamma;
                     }
                 }
 
-                // Tensor decomp sumcheck for this table
                 let mut eq_r_fold = eq_r.clone();
                 let mut eq_hi_fold = combined_eq_hi;
                 let mut eq_lo_fold = combined_eq_lo;
                 let table_contrib: EF = eq_r_fold.iter()
-                    .zip(eq_hi_fold.iter())
-                    .zip(eq_lo_fold.iter())
-                    .map(|((&e, &h), &l)| e * h * l)
-                    .sum();
+                    .zip(eq_hi_fold.iter()).zip(eq_lo_fold.iter())
+                    .map(|((&e, &h), &l)| e * h * l).sum();
                 prover_state.add_extension_scalar(table_contrib);
 
                 let (_hi_eval, _lo_eval, row_point) = shout_binding::prove_tensor_decomp_sumcheck(
                     &mut prover_state, &mut eq_r_fold, &mut eq_hi_fold, &mut eq_lo_fold, table_contrib,
                 );
 
-                // Section 4.1: Concatenated pushforward + ONE GKR
-                let eq_row_prime = eval_eq(&row_point);
-                prover_state.duplex();
-                let alpha_sel: EF = prover_state.sample();
-                let one_minus_alpha = EF::ONE - alpha_sel;
-
-                let addr_col = &trace.columns[groups[0].addr_col];
-                let sqrt_k = 1usize << half_bits;
-
-                // ONE pushforward: P[j] = (1-α)*P_hi[j] + α*P_lo[j]
-                let mut pushforward = EF::zero_vec(sqrt_k);
-                for (row, &eq_val) in eq_row_prime.iter().enumerate() {
-                    let addr_val = addr_col[row].to_usize();
-                    let h = addr_val >> half_bits;
-                    let l = addr_val & ((1 << half_bits) - 1);
-                    if h < sqrt_k { pushforward[h] += one_minus_alpha * eq_val; }
-                    if l < sqrt_k { pushforward[l] += alpha_sel * eq_val; }
-                }
-                prover_state.add_extension_scalars(&pushforward);
-                let c_pf: EF = prover_state.sample();
-
-                // ONE stacked GKR: pushforward + trace_hi + trace_lo
-                let combined_size = (sqrt_k + 2 * n_rows).next_power_of_two();
-                let log_combined = log2_ceil_usize(combined_size);
-
-                let mut combined_nums = EF::zero_vec(combined_size);
-                let mut combined_dens = vec![EF::ONE; combined_size];
-
-                for (j, &p) in pushforward.iter().enumerate() {
-                    combined_nums[j] = -p;
-                    combined_dens[j] = c_pf - EF::from_usize(j);
-                }
-                for i in 0..n_rows {
-                    let addr_val = addr_col[i].to_usize();
-                    combined_nums[sqrt_k + i] = eq_row_prime[i] * one_minus_alpha;
-                    combined_dens[sqrt_k + i] = c_pf - EF::from_usize(addr_val >> half_bits);
-                }
-                for i in 0..n_rows {
-                    let addr_val = addr_col[i].to_usize();
-                    combined_nums[sqrt_k + n_rows + i] = eq_row_prime[i] * alpha_sel;
-                    combined_dens[sqrt_k + n_rows + i] = c_pf - EF::from_usize(addr_val & ((1 << half_bits) - 1));
-                }
-
-                let pivot = ENDIANNESS_PIVOT_GKR.min(log_combined);
-                let comb_nums_packed = pack_ef(&combined_nums);
-                let comb_dens_packed = pack_ef(&combined_dens);
-                let comb_nums_br = br_packed(&comb_nums_packed, pivot);
-                let comb_dens_br = br_packed(&comb_dens_packed, pivot);
-                let gkr_result = prove_gkr_quotient_ext(&mut prover_state, &comb_nums_br, &comb_dens_br, pivot);
-
-                debug_assert!(gkr_result.0.is_zero(),
-                    "Section 4.1 ONE GKR: quotient must be zero for table {}", table.name());
+                mem_decomps.push(TableDecomp {
+                    eq_row_prime: eval_eq(&row_point),
+                    addr_col: &trace.columns[groups[0].addr_col],
+                    n_rows,
+                    half_bits,
+                });
             }
+
+            // --- V-3: Bytecode tensor decomp (before unified GKR) ---
+            let exec_table = Table::execution();
+            let bc_decomp = if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+                let exec_log_n = traces[&exec_table].log_n_rows;
+                let r_air_exec = natural_ordering_point_for_session(&sumcheck_air_point.0, exec_log_n);
+                let eq_r_exec = eval_eq(&r_air_exec);
+                let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
+                let bytecode_table_size = 1usize << bytecode.log_size();
+                let log_bytecode = bytecode.log_size();
+                let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
+                let n_bc_cols = bc_range.len();
+
+                prover_state.duplex();
+                let gamma_bc: EF = prover_state.sample();
+
+                let p_joint_bc = shout_binding::compute_joint_pushforward(pc_col, bytecode_table_size, &eq_r_exec);
+                let batched_bc = sub_protocols::bytecode_binding::compute_batched_bytecode::<EF>(
+                    &bytecode.instructions_multilinear, bytecode_table_size,
+                    bytecode_stride, n_bc_cols, &gamma_bc.powers().collect_n(n_bc_cols),
+                );
+
+                let batched_instr_val: EF = p_joint_bc.iter().zip(batched_bc.iter())
+                    .map(|(&p, &b)| p * b).sum();
+                let col_evals = &table_col_evals[&exec_table];
+                let mut expected_bc_val = EF::ZERO;
+                let mut gp_bc = EF::ONE;
+                for k in 0..n_bc_cols {
+                    expected_bc_val += gp_bc * col_evals[bc_range.start + k];
+                    gp_bc *= gamma_bc;
+                }
+                debug_assert_eq!(batched_instr_val, expected_bc_val,
+                    "Shout bytecode: batched_instr_val must match col_evals");
+                prover_state.add_extension_scalar(batched_instr_val);
+
+                prover_state.duplex();
+                let mut p_bc_fold = p_joint_bc;
+                let mut bc_mem_fold = batched_bc[..bytecode_table_size].to_vec();
+                let (_bc_endpoint, bc_s_point) = shout_binding::prove_shout_value_sumcheck(
+                    &mut prover_state, &mut p_bc_fold, &mut bc_mem_fold, batched_instr_val,
+                );
+
+                let half_bits_bc = HALF_BITS_BC.min(log_bytecode);
+                let bc_s_lo = &bc_s_point[..half_bits_bc];
+                let bc_s_hi = &bc_s_point[half_bits_bc..log_bytecode];
+
+                let pc_hi_col = &traces[&exec_table].columns[EXEC_COL_PC_HI];
+                let pc_lo_col = &traces[&exec_table].columns[EXEC_COL_PC_LO];
+                let n_exec_rows = 1usize << exec_log_n;
+
+                let (eq_hi_table, eq_lo_table) = shout_binding::build_eq_addr_tables(
+                    &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
+                    bc_s_hi, bc_s_lo, half_bits_bc,
+                );
+
+                let mut eq_r_bc_fold = eq_r_exec.clone();
+                let mut eq_hi_bc_fold = eq_hi_table;
+                let mut eq_lo_bc_fold = eq_lo_table;
+                let bc_pjoint_eval: EF = eq_r_bc_fold.iter()
+                    .zip(eq_hi_bc_fold.iter()).zip(eq_lo_bc_fold.iter())
+                    .map(|((&e, &h), &l)| e * h * l).sum();
+                prover_state.add_extension_scalar(bc_pjoint_eval);
+
+                let (_bc_hi_eval, _bc_lo_eval, bc_row_point) = shout_binding::prove_tensor_decomp_sumcheck(
+                    &mut prover_state, &mut eq_r_bc_fold, &mut eq_hi_bc_fold, &mut eq_lo_bc_fold, bc_pjoint_eval,
+                );
+
+                Some((eval_eq(&bc_row_point), pc_hi_col, pc_lo_col, n_exec_rows, half_bits_bc))
+            } else {
+                None
+            };
+
+            // --- Unified binding GKR: ONE alpha, ONE pushforward, ONE c_pf, ONE GKR ---
+            prover_state.duplex();
+            let alpha_sel: EF = prover_state.sample();
+            let one_minus_alpha = EF::ONE - alpha_sel;
+
+            let sqrt_k_mem = 1usize << half_bits;
+            let sqrt_k_bc = bc_decomp.as_ref().map_or(0, |d| 1usize << d.4);
+            let pf_total = sqrt_k_mem + sqrt_k_bc;
+
+            // Build combined pushforward: [P_mem | P_bc]
+            let mut combined_pf = EF::zero_vec(pf_total);
+            for decomp in &mem_decomps {
+                let sqrt_k = 1usize << decomp.half_bits;
+                for (row, &eq_val) in decomp.eq_row_prime.iter().enumerate() {
+                    let addr_val = decomp.addr_col[row].to_usize();
+                    let h = addr_val >> decomp.half_bits;
+                    let l = addr_val & ((1 << decomp.half_bits) - 1);
+                    if h < sqrt_k { combined_pf[h] += one_minus_alpha * eq_val; }
+                    if l < sqrt_k { combined_pf[l] += alpha_sel * eq_val; }
+                }
+            }
+            if let Some((ref bc_eq_row, pc_hi_col, pc_lo_col, n_exec_rows, _hb_bc)) = bc_decomp {
+                for row in 0..n_exec_rows {
+                    let eq_val = bc_eq_row[row];
+                    let h = pc_hi_col[row].to_usize();
+                    let l = pc_lo_col[row].to_usize();
+                    if h < sqrt_k_bc { combined_pf[sqrt_k_mem + h] += one_minus_alpha * eq_val; }
+                    if l < sqrt_k_bc { combined_pf[sqrt_k_mem + l] += alpha_sel * eq_val; }
+                }
+            }
+            prover_state.add_extension_scalars(&combined_pf);
+            let c_pf: EF = prover_state.sample();
+
+            // Build combined GKR: pushforward + all trace entries
+            let mut total_trace_rows = 0usize;
+            for d in &mem_decomps { total_trace_rows += 2 * d.n_rows; }
+            if let Some((_, _, _, n_exec, _)) = &bc_decomp { total_trace_rows += 2 * n_exec; }
+            let combined_size = (pf_total + total_trace_rows).next_power_of_two();
+            let log_combined = log2_ceil_usize(combined_size);
+
+            let mut combined_nums = EF::zero_vec(combined_size);
+            let mut combined_dens = vec![EF::ONE; combined_size];
+
+            // Pushforward entries: memory part [0..sqrt_k_mem]
+            for j in 0..sqrt_k_mem {
+                combined_nums[j] = -combined_pf[j];
+                combined_dens[j] = c_pf - EF::from_usize(j);
+            }
+            // Pushforward entries: bytecode part [sqrt_k_mem..pf_total]
+            for j in 0..sqrt_k_bc {
+                combined_nums[sqrt_k_mem + j] = -combined_pf[sqrt_k_mem + j];
+                combined_dens[sqrt_k_mem + j] = c_pf - EF::from_usize(sqrt_k_mem + j);
+            }
+
+            // Trace entries for memory tables
+            let mut offset = pf_total;
+            for decomp in &mem_decomps {
+                for i in 0..decomp.n_rows {
+                    let addr_val = decomp.addr_col[i].to_usize();
+                    combined_nums[offset + i] = decomp.eq_row_prime[i] * one_minus_alpha;
+                    combined_dens[offset + i] = c_pf - EF::from_usize(addr_val >> decomp.half_bits);
+                }
+                offset += decomp.n_rows;
+                for i in 0..decomp.n_rows {
+                    let addr_val = decomp.addr_col[i].to_usize();
+                    combined_nums[offset + i] = decomp.eq_row_prime[i] * alpha_sel;
+                    combined_dens[offset + i] = c_pf - EF::from_usize(addr_val & ((1 << decomp.half_bits) - 1));
+                }
+                offset += decomp.n_rows;
+            }
+
+            // Trace entries for bytecode
+            if let Some((ref bc_eq_row, pc_hi_col, pc_lo_col, n_exec_rows, _)) = bc_decomp {
+                for i in 0..n_exec_rows {
+                    combined_nums[offset + i] = bc_eq_row[i] * one_minus_alpha;
+                    combined_dens[offset + i] = c_pf - EF::from_usize(sqrt_k_mem + pc_hi_col[i].to_usize());
+                }
+                offset += n_exec_rows;
+                for i in 0..n_exec_rows {
+                    combined_nums[offset + i] = bc_eq_row[i] * alpha_sel;
+                    combined_dens[offset + i] = c_pf - EF::from_usize(sqrt_k_mem + pc_lo_col[i].to_usize());
+                }
+            }
+
+            let pivot = ENDIANNESS_PIVOT_GKR.min(log_combined);
+            let comb_nums_packed = pack_ef(&combined_nums);
+            let comb_dens_packed = pack_ef(&combined_dens);
+            let comb_nums_br = br_packed(&comb_nums_packed, pivot);
+            let comb_dens_br = br_packed(&comb_dens_packed, pivot);
+            let gkr_result = prove_gkr_quotient_ext(&mut prover_state, &comb_nums_br, &comb_dens_br, pivot);
+            debug_assert!(gkr_result.0.is_zero(), "Unified binding GKR: quotient must be zero");
 
             eprintln!("    step4+ tensor+gkr: {:.0}ms", _t3.elapsed().as_secs_f64() * 1000.0);
             prover_state.duplex();
@@ -478,126 +589,6 @@ pub fn prove_execution(
         } else {
             None
         };
-
-        // --- V-3: Bytecode-bound instruction columns (Shout protocol) ---
-        let exec_table = Table::execution();
-        if let Some(bc_range) = exec_table.bytecode_bound_columns() {
-            use sub_protocols::shout_binding;
-
-            let exec_log_n = traces[&exec_table].log_n_rows;
-            let r_air_exec = natural_ordering_point_for_session(&sumcheck_air_point.0, exec_log_n);
-            let eq_r_exec = eval_eq(&r_air_exec);
-            let pc_col = &traces[&exec_table].columns[EXEC_COL_PC];
-            let bytecode_table_size = 1usize << bytecode.log_size();
-            let log_bytecode = bytecode.log_size();
-            let bytecode_stride = N_INSTRUCTION_COLUMNS.next_power_of_two();
-            let n_bc_cols = bc_range.len();
-
-            prover_state.duplex();
-            let gamma_bc: EF = prover_state.sample();
-
-            // Step 1: Joint pushforward for bytecode
-            let p_joint_bc = shout_binding::compute_joint_pushforward(pc_col, bytecode_table_size, &eq_r_exec);
-
-            // Step 2: Batch bytecode columns
-            let batched_bc = sub_protocols::bytecode_binding::compute_batched_bytecode::<EF>(
-                &bytecode.instructions_multilinear, bytecode_table_size,
-                bytecode_stride, n_bc_cols, &gamma_bc.powers().collect_n(n_bc_cols),
-            );
-
-            let batched_instr_val: EF = p_joint_bc.iter().zip(batched_bc.iter())
-                .map(|(&p, &b)| p * b).sum();
-            let col_evals = &table_col_evals[&exec_table];
-            let mut expected_bc_val = EF::ZERO;
-            let mut gp_bc = EF::ONE;
-            for k in 0..n_bc_cols {
-                expected_bc_val += gp_bc * col_evals[bc_range.start + k];
-                gp_bc *= gamma_bc;
-            }
-            debug_assert_eq!(batched_instr_val, expected_bc_val,
-                "Shout bytecode: batched_instr_val must match col_evals");
-            prover_state.add_extension_scalar(batched_instr_val);
-
-            // Step 3: Shout value sumcheck for bytecode
-            prover_state.duplex();
-            let mut p_bc_fold = p_joint_bc;
-            let mut bc_mem_fold = batched_bc[..bytecode_table_size].to_vec();
-            let (_bc_endpoint, bc_s_point) = shout_binding::prove_shout_value_sumcheck(
-                &mut prover_state, &mut p_bc_fold, &mut bc_mem_fold, batched_instr_val,
-            );
-
-            // Step 4: Tensor decomposition for bytecode using PC_HI/PC_LO
-            let half_bits_bc = HALF_BITS_BC.min(log_bytecode);
-            let bc_s_lo = &bc_s_point[..half_bits_bc];
-            let bc_s_hi = &bc_s_point[half_bits_bc..log_bytecode];
-
-            let pc_hi_col = &traces[&exec_table].columns[EXEC_COL_PC_HI];
-            let pc_lo_col = &traces[&exec_table].columns[EXEC_COL_PC_LO];
-            let n_exec_rows = 1usize << exec_log_n;
-
-            let (eq_hi_table, eq_lo_table) = shout_binding::build_eq_addr_tables(
-                &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
-                bc_s_hi, bc_s_lo, half_bits_bc,
-            );
-
-            let mut eq_r_bc_fold = eq_r_exec.clone();
-            let mut eq_hi_bc_fold = eq_hi_table;
-            let mut eq_lo_bc_fold = eq_lo_table;
-            let bc_pjoint_eval: EF = eq_r_bc_fold.iter()
-                .zip(eq_hi_bc_fold.iter()).zip(eq_lo_bc_fold.iter())
-                .map(|((&e, &h), &l)| e * h * l).sum();
-            prover_state.add_extension_scalar(bc_pjoint_eval);
-
-            let (_bc_hi_eval, _bc_lo_eval, bc_row_point) = shout_binding::prove_tensor_decomp_sumcheck(
-                &mut prover_state, &mut eq_r_bc_fold, &mut eq_hi_bc_fold, &mut eq_lo_bc_fold, bc_pjoint_eval,
-            );
-
-            // Section 4.1: Concatenated pushforward + ONE GKR for bytecode
-            let eq_bc_row_prime = eval_eq(&bc_row_point);
-            prover_state.duplex();
-            let bc_alpha_sel: EF = prover_state.sample();
-            let bc_one_minus_alpha = EF::ONE - bc_alpha_sel;
-
-            let sqrt_bc = 1usize << half_bits_bc;
-            let mut bc_pushforward = EF::zero_vec(sqrt_bc);
-            for (row, &eq_val) in eq_bc_row_prime.iter().enumerate() {
-                let h = pc_hi_col[row].to_usize();
-                let l = pc_lo_col[row].to_usize();
-                if h < sqrt_bc { bc_pushforward[h] += bc_one_minus_alpha * eq_val; }
-                if l < sqrt_bc { bc_pushforward[l] += bc_alpha_sel * eq_val; }
-            }
-            prover_state.add_extension_scalars(&bc_pushforward);
-            let bc_c_pf: EF = prover_state.sample();
-
-            let bc_combined_size = (sqrt_bc + 2 * n_exec_rows).next_power_of_two();
-            let bc_log_combined = log2_ceil_usize(bc_combined_size);
-
-            let mut bc_comb_nums = EF::zero_vec(bc_combined_size);
-            let mut bc_comb_dens = vec![EF::ONE; bc_combined_size];
-
-            for (j, &p) in bc_pushforward.iter().enumerate() {
-                bc_comb_nums[j] = -p;
-                bc_comb_dens[j] = bc_c_pf - EF::from_usize(j);
-            }
-            for i in 0..n_exec_rows {
-                bc_comb_nums[sqrt_bc + i] = eq_bc_row_prime[i] * bc_one_minus_alpha;
-                bc_comb_dens[sqrt_bc + i] = bc_c_pf - EF::from(pc_hi_col[i]);
-            }
-            for i in 0..n_exec_rows {
-                bc_comb_nums[sqrt_bc + n_exec_rows + i] = eq_bc_row_prime[i] * bc_alpha_sel;
-                bc_comb_dens[sqrt_bc + n_exec_rows + i] = bc_c_pf - EF::from(pc_lo_col[i]);
-            }
-
-            let bc_pivot = ENDIANNESS_PIVOT_GKR.min(bc_log_combined);
-            let bc_comb_nums_packed = pack_ef(&bc_comb_nums);
-            let bc_comb_dens_packed = pack_ef(&bc_comb_dens);
-            let bc_comb_nums_br = br_packed(&bc_comb_nums_packed, bc_pivot);
-            let bc_comb_dens_br = br_packed(&bc_comb_dens_packed, bc_pivot);
-            let bc_gkr = prove_gkr_quotient_ext(&mut prover_state, &bc_comb_nums_br, &bc_comb_dens_br, bc_pivot);
-
-            debug_assert!(bc_gkr.0.is_zero(), "Section 4.1 ONE GKR: bytecode quotient must be zero");
-            prover_state.duplex();
-        }
 
         // --- Phase 3: Poseidon GKR (verify deterministic intermediates) ---
         let poseidon_table = Table::poseidon16();

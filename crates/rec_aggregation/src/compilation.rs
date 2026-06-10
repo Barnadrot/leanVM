@@ -477,6 +477,10 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             "MEM_BIND_HALF_BITS_MAX_PLACEHOLDER".to_string(),
             (MAX_LOG_MEMORY_SIZE / 2).to_string(),
         );
+        replacements.insert(
+            "HALF_BITS_BC_PLACEHOLDER".to_string(),
+            (MAX_BYTECODE_LOG_SIZE / 2).to_string(),
+        );
     }
     // Poseidon GKR constants for in-circuit endpoint verification
     {

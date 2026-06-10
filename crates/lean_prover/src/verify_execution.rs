@@ -214,39 +214,77 @@ pub fn verify_execution(
             )?;
             let s_point = shout_result.1;
 
-            // Tensor decomposition per table
+            // Tensor decomposition per table (store results for unified GKR)
             let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
+            let mut mem_table_n_rows: Vec<usize> = Vec::new();
 
             for table in ALL_TABLES {
                 let groups = memory_binding_groups(&table);
                 if groups.is_empty() { continue; }
                 let log_n = table_n_vars[&table];
 
-                // Receive table contribution
                 let table_contrib = verifier_state.next_extension_scalar()?;
-
-                // Verify tensor decomp sumcheck
-                let td_result = shout_binding::verify_tensor_decomp_sumcheck(
+                let _td_result = shout_binding::verify_tensor_decomp_sumcheck(
                     &mut verifier_state, log_n, table_contrib,
                 )?;
-                let _row_point = td_result.1;
+                mem_table_n_rows.push(1usize << log_n);
+            }
 
-                // Section 4.1: receive pushforward, verify ONE GKR
+            // --- V-3: Bytecode tensor decomp (before unified GKR) ---
+            let exec_table = Table::execution();
+            let bc_info = if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+                let log_bytecode_size = bytecode.log_size();
+                let n_bc_cols = bc_range.len();
+
                 verifier_state.duplex();
-                let _alpha_sel: EF = verifier_state.sample();
-                let sqrt_k = 1usize << half_bits;
-                let _pushforward = verifier_state.next_extension_scalars_vec(sqrt_k)?;
-                let _c_pf: EF = verifier_state.sample();
+                let gamma_bc: EF = verifier_state.sample();
 
-                // ONE stacked GKR: pushforward + trace_hi + trace_lo
-                let n_rows_table = 1usize << log_n;
-                let combined_size = (sqrt_k + 2 * n_rows_table).next_power_of_two();
-                let log_combined = log2_ceil_usize(combined_size);
-                let gkr_result = verify_gkr_quotient(&mut verifier_state, log_combined)?;
-
-                if !gkr_result.0.is_zero() {
+                let batched_instr_val = verifier_state.next_extension_scalar()?;
+                let col_evals = &table_col_evals[&exec_table];
+                let mut expected_bc_val = EF::ZERO;
+                let mut gp_bc = EF::ONE;
+                for k in 0..n_bc_cols {
+                    expected_bc_val += gp_bc * col_evals[bc_range.start + k];
+                    gp_bc *= gamma_bc;
+                }
+                if expected_bc_val != batched_instr_val {
                     return Err(ProofError::InvalidProof);
                 }
+
+                verifier_state.duplex();
+                let _bc_shout = shout_binding::verify_shout_value_sumcheck(
+                    &mut verifier_state, log_bytecode_size, batched_instr_val,
+                )?;
+
+                let bc_pjoint_eval = verifier_state.next_extension_scalar()?;
+                let exec_log_n = table_n_vars[&exec_table];
+                let _bc_td = shout_binding::verify_tensor_decomp_sumcheck(
+                    &mut verifier_state, exec_log_n, bc_pjoint_eval,
+                )?;
+
+                let half_bits_bc = HALF_BITS_BC.min(log_bytecode_size);
+                Some((1usize << exec_log_n, half_bits_bc))
+            } else {
+                None
+            };
+
+            // --- Unified binding GKR: ONE alpha, ONE pushforward, ONE c_pf, ONE GKR ---
+            verifier_state.duplex();
+            let _alpha_sel: EF = verifier_state.sample();
+
+            let sqrt_k_mem = 1usize << half_bits;
+            let sqrt_k_bc = bc_info.map_or(0, |(_, hb)| 1usize << hb);
+            let pf_total = sqrt_k_mem + sqrt_k_bc;
+            let _combined_pf = verifier_state.next_extension_scalars_vec(pf_total)?;
+            let _c_pf: EF = verifier_state.sample();
+
+            let mut total_trace_rows: usize = mem_table_n_rows.iter().map(|n| 2 * n).sum();
+            if let Some((n_exec, _)) = bc_info { total_trace_rows += 2 * n_exec; }
+            let combined_size = (pf_total + total_trace_rows).next_power_of_two();
+            let log_combined = log2_ceil_usize(combined_size);
+            let gkr_result = verify_gkr_quotient(&mut verifier_state, log_combined)?;
+            if !gkr_result.0.is_zero() {
+                return Err(ProofError::InvalidProof);
             }
 
             verifier_state.duplex();
@@ -254,57 +292,6 @@ pub fn verify_execution(
         } else {
             None
         };
-
-        // --- V-3: Bytecode-bound instruction columns (Shout protocol) ---
-        let exec_table = Table::execution();
-        if let Some(bc_range) = exec_table.bytecode_bound_columns() {
-            let log_bytecode_size = bytecode.log_size();
-            let n_bc_cols = bc_range.len();
-
-            verifier_state.duplex();
-            let gamma_bc: EF = verifier_state.sample();
-
-            let batched_instr_val = verifier_state.next_extension_scalar()?;
-            let col_evals = &table_col_evals[&exec_table];
-            let mut expected_bc_val = EF::ZERO;
-            let mut gp_bc = EF::ONE;
-            for k in 0..n_bc_cols {
-                expected_bc_val += gp_bc * col_evals[bc_range.start + k];
-                gp_bc *= gamma_bc;
-            }
-            if expected_bc_val != batched_instr_val {
-                return Err(ProofError::InvalidProof);
-            }
-
-            // Shout value sumcheck for bytecode
-            verifier_state.duplex();
-            let _bc_shout = shout_binding::verify_shout_value_sumcheck(
-                &mut verifier_state, log_bytecode_size, batched_instr_val,
-            )?;
-
-            // Tensor decomp for bytecode
-            let bc_pjoint_eval = verifier_state.next_extension_scalar()?;
-            let exec_log_n = table_n_vars[&exec_table];
-            let _bc_td = shout_binding::verify_tensor_decomp_sumcheck(
-                &mut verifier_state, exec_log_n, bc_pjoint_eval,
-            )?;
-
-            // Section 4.1: receive pushforward, verify ONE GKR for bytecode
-            verifier_state.duplex();
-            let _bc_alpha_sel: EF = verifier_state.sample();
-            let half_bits_bc = HALF_BITS_BC.min(bytecode.log_size());
-            let sqrt_bc = 1usize << half_bits_bc;
-            let _bc_pushforward = verifier_state.next_extension_scalars_vec(sqrt_bc)?;
-            let _bc_c_pf: EF = verifier_state.sample();
-
-            let bc_combined_size = (sqrt_bc + 2 * (1usize << exec_log_n)).next_power_of_two();
-            let bc_log_combined = log2_ceil_usize(bc_combined_size);
-            let bc_gkr = verify_gkr_quotient(&mut verifier_state, bc_log_combined)?;
-            if !bc_gkr.0.is_zero() {
-                return Err(ProofError::InvalidProof);
-            }
-            verifier_state.duplex();
-        }
 
         // --- Phase 3: Poseidon GKR (verify deterministic intermediates) ---
         {
