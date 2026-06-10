@@ -48,7 +48,6 @@ where
         }
     }
 
-
     pub fn check_fully_consumed(&self) -> Result<(), ProofError> {
         if self.transcript_offset != self.transcript.len()
             || self.merkle_opening_index != self.merkle_openings.len()
