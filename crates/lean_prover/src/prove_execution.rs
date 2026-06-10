@@ -4,7 +4,6 @@ use crate::*;
 use backend::ArenaVec;
 use backend::ansi::Colorize;
 use lean_vm::*;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sub_protocols::*;
 use tracing::info_span;
@@ -288,15 +287,19 @@ pub fn prove_execution(
         }
 
         // Step 2: Compute claimed_sum = <P_joint, memory>
-        let claimed_sum: EF = p_joint.iter().zip(memory.iter())
-            .map(|(&p, &m)| p * EF::from(m)).sum();
+        let claimed_sum: EF = parallel::map_reduce(
+            memory_size,
+            || EF::ZERO,
+            |i| p_joint[i] * EF::from(memory[i]),
+            |a, b| a + b,
+        );
         debug_assert_eq!(claimed_sum, expected_batched_val);
         prover_state.add_extension_scalar(claimed_sum);
 
         // Step 3: Shout value sumcheck (degree 2, log_memory rounds)
         prover_state.duplex();
         let mut p_joint_fold = p_joint;
-        let mut mem_ef: Vec<EF> = memory.iter().map(|&m| EF::from(m)).collect();
+        let mut mem_ef: Vec<EF> = parallel::par_map_collect(memory.len(), |i| EF::from(memory[i]));
         mem_ef.resize(memory_size, EF::ZERO);
         let (_shout_endpoint, s_point) = shout_binding::prove_shout_value_sumcheck(
             &mut prover_state, &mut p_joint_fold, &mut mem_ef, claimed_sum,
@@ -391,8 +394,13 @@ pub fn prove_execution(
                 bytecode_stride, n_bc_cols, &gamma_bc.powers().collect_n(n_bc_cols),
             );
 
-            let batched_instr_val: EF = p_joint_bc.iter().zip(batched_bc.iter())
-                .map(|(&p, &b)| p * b).sum();
+            let bc_len = p_joint_bc.len().min(batched_bc.len());
+            let batched_instr_val: EF = parallel::map_reduce(
+                bc_len,
+                || EF::ZERO,
+                |i| p_joint_bc[i] * batched_bc[i],
+                |a, b| a + b,
+            );
             let col_evals = &table_col_evals[&exec_table];
             let mut expected_bc_val = EF::ZERO;
             let mut gp_bc = EF::ONE;
@@ -481,41 +489,61 @@ pub fn prove_execution(
         let mut combined_nums = EF::zero_vec(combined_size);
         let mut combined_dens = vec![EF::ONE; combined_size];
 
-        for j in 0..sqrt_k_mem {
-            combined_nums[j] = -combined_pf[j];
-            combined_dens[j] = c_pf - EF::from_usize(j);
-        }
-        for j in 0..sqrt_k_bc {
-            combined_nums[sqrt_k_mem + j] = -combined_pf[sqrt_k_mem + j];
-            combined_dens[sqrt_k_mem + j] = c_pf - EF::from_usize(sqrt_k_mem + j);
-        }
+        // Pushforward entries (memory + bytecode) — parallel fill
+        parallel::par_for_each_mut2(
+            &mut combined_nums[..pf_total],
+            &mut combined_dens[..pf_total],
+            |j, num, den| {
+                *num = -combined_pf[j];
+                *den = c_pf - EF::from_usize(j);
+            },
+        );
 
+        // Trace entries — parallel fill per section
         let mut offset = pf_total;
         for decomp in &mem_decomps {
-            for i in 0..decomp.n_rows {
-                let addr_val = decomp.addr_col[i].to_usize();
-                combined_nums[offset + i] = decomp.eq_row_prime[i] * one_minus_alpha;
-                combined_dens[offset + i] = c_pf - EF::from_usize(addr_val >> decomp.half_bits);
-            }
-            offset += decomp.n_rows;
-            for i in 0..decomp.n_rows {
-                let addr_val = decomp.addr_col[i].to_usize();
-                combined_nums[offset + i] = decomp.eq_row_prime[i] * alpha_sel;
-                combined_dens[offset + i] = c_pf - EF::from_usize(addr_val & ((1 << decomp.half_bits) - 1));
-            }
-            offset += decomp.n_rows;
+            let o_hi = offset;
+            let o_lo = offset + decomp.n_rows;
+            parallel::par_for_each_mut2(
+                &mut combined_nums[o_hi..o_hi + decomp.n_rows],
+                &mut combined_dens[o_hi..o_hi + decomp.n_rows],
+                |i, num, den| {
+                    let addr_val = decomp.addr_col[i].to_usize();
+                    *num = decomp.eq_row_prime[i] * one_minus_alpha;
+                    *den = c_pf - EF::from_usize(addr_val >> decomp.half_bits);
+                },
+            );
+            parallel::par_for_each_mut2(
+                &mut combined_nums[o_lo..o_lo + decomp.n_rows],
+                &mut combined_dens[o_lo..o_lo + decomp.n_rows],
+                |i, num, den| {
+                    let addr_val = decomp.addr_col[i].to_usize();
+                    *num = decomp.eq_row_prime[i] * alpha_sel;
+                    *den = c_pf - EF::from_usize(addr_val & ((1 << decomp.half_bits) - 1));
+                },
+            );
+            offset += 2 * decomp.n_rows;
         }
 
         if let Some((ref bc_eq_row, pc_hi_col, pc_lo_col, n_exec_rows, _)) = bc_decomp {
-            for i in 0..n_exec_rows {
-                combined_nums[offset + i] = bc_eq_row[i] * one_minus_alpha;
-                combined_dens[offset + i] = c_pf - EF::from_usize(sqrt_k_mem + pc_hi_col[i].to_usize());
-            }
-            offset += n_exec_rows;
-            for i in 0..n_exec_rows {
-                combined_nums[offset + i] = bc_eq_row[i] * alpha_sel;
-                combined_dens[offset + i] = c_pf - EF::from_usize(sqrt_k_mem + pc_lo_col[i].to_usize());
-            }
+            let o_hi = offset;
+            let o_lo = offset + n_exec_rows;
+            parallel::par_for_each_mut2(
+                &mut combined_nums[o_hi..o_hi + n_exec_rows],
+                &mut combined_dens[o_hi..o_hi + n_exec_rows],
+                |i, num, den| {
+                    *num = bc_eq_row[i] * one_minus_alpha;
+                    *den = c_pf - EF::from_usize(sqrt_k_mem + pc_hi_col[i].to_usize());
+                },
+            );
+            parallel::par_for_each_mut2(
+                &mut combined_nums[o_lo..o_lo + n_exec_rows],
+                &mut combined_dens[o_lo..o_lo + n_exec_rows],
+                |i, num, den| {
+                    *num = bc_eq_row[i] * alpha_sel;
+                    *den = c_pf - EF::from_usize(sqrt_k_mem + pc_lo_col[i].to_usize());
+                },
+            );
         }
 
         let pivot = ENDIANNESS_PIVOT_GKR.min(log_combined);

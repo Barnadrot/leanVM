@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 
+#[derive(Debug)]
 pub struct MemoryBindingGroup {
     pub addr_col: usize,
     pub value_cols: Vec<usize>,
