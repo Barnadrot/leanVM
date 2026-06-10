@@ -99,6 +99,15 @@ impl Air for Table {
     fn n_shift_columns(&self) -> usize {
         delegate_to_inner!(self, n_shift_columns)
     }
+    fn n_committed_columns(&self) -> usize {
+        delegate_to_inner!(self, n_committed_columns)
+    }
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        delegate_to_inner!(self, bytecode_bound_columns)
+    }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        delegate_to_inner!(self, memory_bound_columns)
+    }
     fn eval<AB: AirBuilder>(&self, _: &mut AB, _: &Self::ExtraData) {
         unreachable!()
     }
