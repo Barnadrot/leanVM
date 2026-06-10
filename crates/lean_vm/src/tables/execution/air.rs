@@ -1,7 +1,7 @@
-use crate::{EF, ExecutionTable, ExtraDataForBuses, eval_bus_virtual};
+use crate::{EF, ExecutionTable, ExtraDataForBuses, MAX_BYTECODE_LOG_SIZE, eval_bus_virtual};
 use backend::*;
 
-pub const N_RUNTIME_COLUMNS: usize = 8;
+pub const N_RUNTIME_COLUMNS: usize = 10;
 pub const N_INSTRUCTION_COLUMNS: usize = 12;
 pub const N_TOTAL_EXECUTION_COLUMNS: usize = N_INSTRUCTION_COLUMNS + N_RUNTIME_COLUMNS;
 
@@ -15,32 +15,46 @@ pub const EXEC_COL_VALUE_A: usize = 5;
 pub const EXEC_COL_VALUE_B: usize = 6;
 pub const EXEC_COL_VALUE_C: usize = 7;
 
+// d=2 address decomposition columns for PC (for Shout logup*)
+pub const EXEC_COL_PC_HI: usize = 8;
+pub const EXEC_COL_PC_LO: usize = 9;
+
 // Decoded instruction columns
-pub const EXEC_COL_OPERAND_A: usize = 8;
-pub const EXEC_COL_OPERAND_B: usize = 9;
-pub const EXEC_COL_OPERAND_C: usize = 10;
-pub const EXEC_COL_FLAG_A: usize = 11;
-pub const EXEC_COL_FLAG_B: usize = 12;
-pub const EXEC_COL_FLAG_C: usize = 13;
-pub const EXEC_COL_FLAG_C_FP: usize = 14;
-pub const EXEC_COL_FLAG_AB_FP: usize = 15;
-pub const EXEC_COL_FLAG_MUL: usize = 16;
-pub const EXEC_COL_FLAG_JUMP: usize = 17;
-pub const EXEC_COL_AUX_1: usize = 18;
-pub const EXEC_COL_AUX_2: usize = 19;
+pub const EXEC_COL_OPERAND_A: usize = 10;
+pub const EXEC_COL_OPERAND_B: usize = 11;
+pub const EXEC_COL_OPERAND_C: usize = 12;
+pub const EXEC_COL_FLAG_A: usize = 13;
+pub const EXEC_COL_FLAG_B: usize = 14;
+pub const EXEC_COL_FLAG_C: usize = 15;
+pub const EXEC_COL_FLAG_C_FP: usize = 16;
+pub const EXEC_COL_FLAG_AB_FP: usize = 17;
+pub const EXEC_COL_FLAG_MUL: usize = 18;
+pub const EXEC_COL_FLAG_JUMP: usize = 19;
+pub const EXEC_COL_AUX_1: usize = 20;
+pub const EXEC_COL_AUX_2: usize = 21;
 
 // Temporary columns (stored to avoid duplicate computations)
 pub const N_TEMPORARY_EXEC_COLUMNS: usize = 4;
-pub const EXEC_COL_FLAG_PRECOMPILE: usize = 20;
-pub const EXEC_COL_NU_A: usize = 21;
-pub const EXEC_COL_NU_B: usize = 22;
-pub const EXEC_COL_NU_C: usize = 23;
+pub const EXEC_COL_FLAG_PRECOMPILE: usize = 22;
+pub const EXEC_COL_NU_A: usize = 23;
+pub const EXEC_COL_NU_B: usize = 24;
+pub const EXEC_COL_NU_C: usize = 25;
+
+/// Number of bits in the low half of the PC decomposition for d=2 Shout.
+/// HALF_BITS_BC = MAX_BYTECODE_LOG_SIZE / 2 = 11, so the split modulus is 2^11.
+pub const HALF_BITS_BC: usize = MAX_BYTECODE_LOG_SIZE / 2;
 
 impl<const BUS: bool> Air for ExecutionTable<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
 
     fn n_columns(&self) -> usize {
         N_TOTAL_EXECUTION_COLUMNS
+    }
+    fn n_committed_columns(&self) -> usize {
+        N_RUNTIME_COLUMNS
+    }
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        Some(N_RUNTIME_COLUMNS..N_TOTAL_EXECUTION_COLUMNS)
     }
     fn degree_air(&self) -> usize {
         5
@@ -49,7 +63,7 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         2
     }
     fn n_constraints(&self) -> usize {
-        14
+        15
     }
 
     #[inline]
@@ -77,6 +91,9 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         let pc = flat[EXEC_COL_PC];
         let fp = flat[EXEC_COL_FP];
         let (addr_a, addr_b, addr_c) = (flat[EXEC_COL_ADDR_A], flat[EXEC_COL_ADDR_B], flat[EXEC_COL_ADDR_C]);
+
+        let pc_hi = flat[EXEC_COL_PC_HI];
+        let pc_lo = flat[EXEC_COL_PC_LO];
 
         let one_minus_flag_a_and_flag_ab_fp = -(flag_a + flag_ab_fp - AB::F::ONE);
         let one_minus_flag_b_and_flag_ab_fp = -(flag_b + flag_ab_fp - AB::F::ONE);
@@ -122,6 +139,10 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         let not_jump_and_condition = -(jump_and_condition - AB::F::ONE);
         builder.assert_zero(not_jump_and_condition * (pc_shift - pc_plus_one));
         builder.assert_zero(not_jump_and_condition * (fp_shift - fp));
+
+        // d=2 PC decomposition: PC = PC_HI * 2^HALF_BITS_BC + PC_LO
+        let half_bits_bc_modulus = AB::F::from_usize(1usize << HALF_BITS_BC);
+        builder.assert_zero(pc - pc_hi * half_bits_bc_modulus - pc_lo);
     }
 }
 

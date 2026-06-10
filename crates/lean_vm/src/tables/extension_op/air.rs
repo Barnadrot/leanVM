@@ -18,16 +18,24 @@ pub(super) const COL_IDX_B: usize = 7;
 pub(super) const COL_ACC: usize = 8;
 // --- flat-only columns ---
 pub(super) const COL_IDX_RES: usize = 13;
+// d=2 address decomposition columns (committed, flat-only)
+// addr = addr_hi * 2^HALF_BITS + addr_lo, where HALF_BITS = MAX_LOG_MEMORY_SIZE / 2
+pub(super) const COL_IDX_A_HI: usize = 14;
+pub(super) const COL_IDX_A_LO: usize = 15;
+pub(super) const COL_IDX_B_HI: usize = 16;
+pub(super) const COL_IDX_B_LO: usize = 17;
+pub(super) const COL_IDX_RES_HI: usize = 18;
+pub(super) const COL_IDX_RES_LO: usize = 19;
 /// v_A coordinates (5 columns).
-pub(super) const COL_V_A: usize = 14;
+pub(super) const COL_V_A: usize = 20;
 /// v_B coordinates (5 columns).
-pub(super) const COL_V_B: usize = 19;
+pub(super) const COL_V_B: usize = 25;
 /// res coordinates (5 columns).
-pub(super) const COL_RES: usize = 24;
+pub(super) const COL_RES: usize = 30;
 
 // Virtual columns (not explicitely in AIR)
-pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = 29;
-pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = 30;
+pub(super) const COL_MULTIPLICITY_EXTENSION_OP: usize = 35;
+pub(super) const COL_DOMAINSEP_EXTENSION_OP: usize = 36;
 
 use backend::quintic_extension::extension::quintic_mul;
 
@@ -42,13 +50,23 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
 
     fn n_columns(&self) -> usize {
-        29
+        35
+    }
+    fn n_committed_columns(&self) -> usize {
+        COL_IDX_RES_LO + 1
+    }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        vec![
+            (COL_IDX_A, COL_V_A..COL_V_A + crate::DIMENSION),
+            (COL_IDX_B, COL_V_B..COL_V_B + crate::DIMENSION),
+            (COL_IDX_RES, COL_RES..COL_RES + crate::DIMENSION),
+        ]
     }
     fn degree_air(&self) -> usize {
         6
     }
     fn n_constraints(&self) -> usize {
-        35
+        38
     }
     fn n_shift_columns(&self) -> usize {
         COL_ACC + 5
@@ -94,6 +112,12 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
             + len * AB::F::from_usize(EXT_OP_LEN_MULTIPLIER);
 
         let idx_r = flat[COL_IDX_RES];
+
+        // d=2 address decomposition: addr = addr_hi * 2^HALF_BITS + addr_lo
+        let half_bits_modulus = AB::F::from_usize(1 << (crate::MAX_LOG_MEMORY_SIZE / 2));
+        let decomp_a = idx_a - flat[COL_IDX_A_HI] * half_bits_modulus - flat[COL_IDX_A_LO];
+        let decomp_b = idx_b - flat[COL_IDX_B_HI] * half_bits_modulus - flat[COL_IDX_B_LO];
+        let decomp_res = idx_r - flat[COL_IDX_RES_HI] * half_bits_modulus - flat[COL_IDX_RES_LO];
 
         if BUS {
             eval_bus_virtual::<AB, EF>(builder, extra_data, multiplicity, aux_2, &[idx_a, idx_b, idx_r]);
@@ -155,5 +179,10 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         builder.assert_zero(not_start_shift * (idx_b_shift - idx_b - AB::F::from_usize(crate::DIMENSION)));
 
         builder.assert_zero(flag_start_shift * (len - AB::F::ONE));
+
+        // d=2 address decomposition constraints
+        builder.assert_zero(decomp_a);
+        builder.assert_zero(decomp_b);
+        builder.assert_zero(decomp_res);
     }
 }

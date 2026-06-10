@@ -16,6 +16,18 @@ pub trait Air: Send + Sync + 'static {
 
     fn n_columns(&self) -> usize;
 
+    fn n_committed_columns(&self) -> usize {
+        self.n_columns()
+    }
+
+    fn bytecode_bound_columns(&self) -> Option<std::ops::Range<usize>> {
+        None
+    }
+
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        vec![]
+    }
+
     fn n_constraints(&self) -> usize;
 
     /// Number of "shift" columns (the ones that are also queried at the next

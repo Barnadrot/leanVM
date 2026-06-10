@@ -1,7 +1,7 @@
 use backend::ansi::Colorize;
 use backend::*;
 use lean_vm::{
-    ALL_TABLES, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE,
+    ALL_TABLES, BusMultiplicity, ColIndex, CommittedStatements, EXEC_COL_PC, MIN_LOG_MEMORY_SIZE, MIN_LOG_N_ROWS_PER_TABLE,
     N_INSTRUCTION_COLUMNS, STARTING_PC, sort_tables_by_height,
 };
 use lean_vm::{EF, F, Table, TableT, TableTrace};
@@ -209,17 +209,18 @@ pub fn total_whir_statements() -> usize {
         .iter()
         .map(|table| {
             let mut seen_cols = std::collections::HashSet::<ColIndex>::new();
-            for bus in table.bus_interactions().iter().filter(|b| b.is_memory_lookup()) {
+            for bus in table.bus_interactions().iter().filter(|b| matches!(b.multiplicity, BusMultiplicity::One)) {
                 for entry in &bus.data {
                     if let Some(col) = entry.column() {
                         seen_cols.insert(col);
                     }
                 }
             }
-            table.n_columns() + table.n_shift_columns() + seen_cols.len()
+            let n_committed = table.n_committed_columns();
+            let committed_seen = seen_cols.iter().filter(|&&c| c < n_committed).count();
+            n_committed + table.n_shift_columns() + committed_seen
         })
         .sum::<usize>()
-        // bytecode lookup
-        + 1 // PC
-        + N_INSTRUCTION_COLUMNS
+        // PC counted via Multiplicity::One bytecode bus
+        + 16 // Poseidon GKR endpoint input evaluations (Finding 1)
 }

@@ -10,6 +10,7 @@ workspace = true
 tracing.workspace = true
 lean_vm.workspace = true
 backend.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

@@ -105,9 +105,12 @@ pub const POSEIDON_COL_OFFSET_LEFT: ColIndex = 6;
 pub const POSEIDON_COL_ADDR_LEFT_LO: ColIndex = 7;
 pub const POSEIDON_COL_ADDR_LEFT_HI: ColIndex = 8;
 pub const POSEIDON_COL_FLAG_PERMUTE: ColIndex = 9;
-pub const POSEIDON_COL_INPUT_START: ColIndex = 10;
-pub const POSEIDON_COL_OUT_LO: ColIndex = num_cols_poseidon_16() - 16;
-pub const POSEIDON_COL_OUT_HI: ColIndex = num_cols_poseidon_16() - 8;
+pub const POSEIDON_COL_NU_C_HI: ColIndex = 10;
+pub const POSEIDON_COL_NU_C_LO: ColIndex = 11;
+pub const N_COMMITTED_COLS_POSEIDON_16: usize = 12 + WIDTH;
+pub const POSEIDON_COL_INPUT_START: ColIndex = 12;
+pub const POSEIDON_COL_OUT_LO: ColIndex = 12 + WIDTH;
+pub const POSEIDON_COL_OUT_HI: ColIndex = 12 + WIDTH + WIDTH / 2;
 /// Non-committed columns ("virtual"):
 pub const POSEIDON_COL_NU_A: ColIndex = num_cols_poseidon_16();
 pub const POSEIDON_COL_DOMAINSEP: ColIndex = num_cols_poseidon_16() + 1;
@@ -191,6 +194,10 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         *perm.multiplicity = F::ZERO;
         *perm.nu_b = F::from_usize(zero_vec_ptr);
         *perm.nu_c = F::from_usize(null_hash_ptr);
+        let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+        let half_mask = (1usize << half_bits) - 1;
+        *perm.nu_c_hi = F::from_usize(null_hash_ptr >> half_bits);
+        *perm.nu_c_lo = F::from_usize(null_hash_ptr & half_mask);
         *perm.flag_out4 = F::ZERO;
         *perm.flag_out8 = F::ONE;
         *perm.flag_left = F::ZERO;
@@ -270,6 +277,12 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         trace.columns[POSEIDON_COL_ADDR_LEFT_LO].push(F::from_usize(left_first_addr));
         trace.columns[POSEIDON_COL_ADDR_LEFT_HI].push(F::from_usize(left_second_addr));
         trace.columns[POSEIDON_COL_FLAG_PERMUTE].push(F::from_bool(permute));
+        {
+            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+            let nu_c_val = index_res_a.to_usize();
+            trace.columns[POSEIDON_COL_NU_C_HI].push(F::from_usize(nu_c_val >> half_bits));
+            trace.columns[POSEIDON_COL_NU_C_LO].push(F::from_usize(nu_c_val & ((1 << half_bits) - 1)));
+        }
         for (i, value) in input.iter().enumerate() {
             trace.columns[POSEIDON_COL_INPUT_START + i].push(*value);
         }
@@ -293,6 +306,13 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
     fn n_columns(&self) -> usize {
         num_cols_poseidon_16()
     }
+    fn n_committed_columns(&self) -> usize {
+        N_COMMITTED_COLS_POSEIDON_16
+    }
+    fn memory_bound_columns(&self) -> Vec<(usize, std::ops::Range<usize>)> {
+        let out_start = POSEIDON_COL_OUT_LO;
+        vec![(POSEIDON_COL_NU_C, out_start..out_start + WIDTH)]
+    }
     fn degree_air(&self) -> usize {
         // The output constraints gate the degree-9 permutation expression by a single linear
         // factor (`1 - flag_out4` for out_lo[4..8], `1 - flag_out8 - flag_out4` for out_hi),
@@ -307,7 +327,7 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         0
     }
     fn n_constraints(&self) -> usize {
-        2 * BUS as usize + 94
+        2 * BUS as usize + 94 + 1
     }
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
         let cols: Poseidon1Cols16<AB::IF> = {
@@ -357,6 +377,10 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         builder.assert_zero(cols.flag_left * (cols.offset_left - cols.addr_left_lo));
         builder.assert_zero(one_minus_flag_left * (nu_a - cols.addr_left_lo));
 
+        // d=2 NU_C decomposition: NU_C = NU_C_HI * 2^HALF_BITS + NU_C_LO
+        let half_bits_modulus = AB::F::from_usize(1usize << (MAX_LOG_MEMORY_SIZE / 2));
+        builder.assert_zero(cols.nu_c - cols.nu_c_hi * half_bits_modulus - cols.nu_c_lo);
+
         eval_poseidon1_16(builder, &cols)
     }
 }
@@ -374,6 +398,8 @@ pub(super) struct Poseidon1Cols16<T> {
     pub addr_left_lo: T,
     pub addr_left_hi: T,
     pub flag_permute: T,
+    pub nu_c_hi: T,
+    pub nu_c_lo: T,
 
     pub inputs: [T; WIDTH],
     pub beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],

@@ -67,6 +67,7 @@ zk-alloc = { path = "crates/backend/zk-alloc" }
 
 # External
 clap = { version = "4.5.59", features = ["derive"] }
+rayon = "1.10"
 rand = "0.10.0"
 pest = "2.7"
 pest_derive = "2.7"
