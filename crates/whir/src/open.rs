@@ -4,7 +4,7 @@ use ::utils::log2_strict_usize;
 use fiat_shamir::{FSProver, MerklePath, ProofResult};
 use field::PrimeCharacteristicRing;
 use field::{ExtensionField, Field, TwoAdicField};
-use sumcheck::{ProductComputation, UNIVARIATE_SKIP_K, run_product_sumcheck_with_skip, sumcheck_prove_many_rounds};
+use sumcheck::{ProductComputation, run_product_sumcheck, sumcheck_prove_many_rounds};
 use tracing::{info_span, instrument};
 use zk_alloc::{ArenaVec, arena_vec};
 
@@ -109,11 +109,7 @@ where
         )?;
 
         let folding_randomness = round_state.folding_randomness(
-            if round_index == 0 {
-                crate::uniskip::n_initial_challenges(self.folding_factor.at_round(0))
-            } else {
-                self.folding_factor.at_round(round_index)
-            } + round_state.commitment_merkle_prover_data_b.is_some() as usize,
+            self.folding_factor.at_round(round_index) + round_state.commitment_merkle_prover_data_b.is_some() as usize,
         );
 
         let stir_evaluations = if let Some(data_b) = &round_state.commitment_merkle_prover_data_b {
@@ -140,13 +136,7 @@ where
         } else {
             open_merkle_tree_at_challenges(&round_state.merkle_prover_data, prover_state, &stir_challenges_indexes)
                 .iter()
-                .map(|answer| {
-                    if round_index == 0 {
-                        crate::uniskip::eval_leaf_skip_owned(answer, &folding_randomness)
-                    } else {
-                        answer.evaluate(&folding_randomness)
-                    }
-                })
+                .map(|answer| answer.evaluate(&folding_randomness))
                 .collect()
         };
 
@@ -432,12 +422,11 @@ where
 
         let mut evals = evals.pack();
         let mut weights = Mle::Owned(MleOwned::ExtensionPacked(weights));
-        let (challengess, new_sum, new_evals, new_weights) = run_product_sumcheck_with_skip(
+        let (challengess, new_sum, new_evals, new_weights) = run_product_sumcheck(
             &evals.by_ref(),
             &weights.by_ref(),
             prover_state,
             sum,
-            UNIVARIATE_SKIP_K,
             folding_factor,
             pow_bits,
         );

@@ -4,7 +4,6 @@ use std::{fmt::Debug, marker::PhantomData};
 
 use fiat_shamir::{FSVerifier, ProofError, ProofResult, try_pack_scalars_to_extension};
 use field::{ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
-use sumcheck::{UNIVARIATE_SKIP_K, verify_product_sumcheck_with_skip};
 
 use crate::*;
 
@@ -111,12 +110,10 @@ where
         let combination_randomness = self.combine_constraints(verifier_state, &mut claimed_sum, &constraints)?;
         round_constraints.push((combination_randomness, constraints));
 
-        // Initial sumcheck (univariate skip binds the first UNIVARIATE_SKIP_K
-        // variables with one challenge; point = [r0, r_K, ..])
-        let folding_randomness = verify_product_sumcheck_with_skip(
+        // Initial sumcheck
+        let folding_randomness = verify_sumcheck_rounds::<F, EF>(
             verifier_state,
             &mut claimed_sum,
-            UNIVARIATE_SKIP_K,
             self.folding_factor.at_round(0),
             self.starting_folding_pow_bits,
         )?;
@@ -270,13 +267,7 @@ where
         // Compute STIR Constraints
         let folds: Vec<_> = answers
             .into_iter()
-            .map(|answers| {
-                if round_index == 0 {
-                    crate::uniskip::eval_leaf_skip(&answers, &folding_randomness.0)
-                } else {
-                    answers.evaluate(folding_randomness)
-                }
-            })
+            .map(|answers| answers.evaluate(folding_randomness))
             .collect();
 
         let stir_constraints = stir_challenges_indexes
@@ -365,18 +356,8 @@ where
 
         for (round, (randomness, constraints)) in constraints.iter().enumerate() {
             if round > 0 {
-                // The initial block contributes n_initial_challenges coords
-                // (univariate skip), later blocks one per folding round.
-                let k = if round == 1 {
-                    crate::uniskip::n_initial_challenges(self.folding_factor.at_round(0))
-                } else {
-                    self.folding_factor.at_round(round - 1)
-                };
+                let k = self.folding_factor.at_round(round - 1);
                 point = MultilinearPoint(point[k..].to_vec());
-            }
-            if round == 0 {
-                value += crate::uniskip::eval_round0_constraints(randomness, constraints, &point);
-                continue;
             }
             let mut i = 0;
             for smt in constraints {
