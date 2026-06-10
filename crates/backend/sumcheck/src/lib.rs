@@ -17,3 +17,6 @@ pub use product_computation::*;
 
 mod univariate_skip;
 pub use univariate_skip::*;
+
+mod univariate_skip_product;
+pub use univariate_skip_product::*;

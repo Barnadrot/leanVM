@@ -14,9 +14,69 @@ use field::*;
 use poly::{PF, eval_eq, lagrange_basis_evals};
 use zk_alloc::ArenaVec;
 
+/// Compile-time skip width, canonical for the whole workspace (AIR skip and
+/// WHIR initial-fold skip share it; mirrored to the python verifier and the
+/// recursion circuit via `compilation.rs`). The kernels take `k` as a runtime
+/// parameter so tests can sweep 3..=5; orchestration layers use this constant.
+pub const UNIVARIATE_SKIP_K: usize = 4;
+
 /// The `2^k` base-window nodes, indexed by cube point `x ∈ 0..2^k`.
 pub fn skip_domain_points<F: Field>(k: usize) -> Vec<F> {
     (0..1usize << k).map(F::from_usize).collect()
+}
+
+/// `S_m = Σ_{j=0}^{2^k−1} j^m` for `m = 0..n_coeffs−1` (convention `0^0 = 1`,
+/// so `S_0 = 2^k`). The verifier-side window-sum identity for a skip round
+/// with NO eq factor is the single dot product `Σ_m c_m·S_m == claimed_sum`
+/// (coefficient form, integer window — see plan_spec.md "Iteration 3").
+pub fn window_power_sums<F: Field>(k: usize, n_coeffs: usize) -> Vec<F> {
+    let mut sums = vec![F::ZERO; n_coeffs];
+    for j in 0..1usize << k {
+        let node = F::from_usize(j);
+        let mut pow = F::ONE; // j^0 = 1, including j = 0
+        for s in sums.iter_mut() {
+            *s += pow;
+            pow *= node;
+        }
+    }
+    sums
+}
+
+// ---------------------------------------------------------------------------
+// Forward-difference (FD) extension over the consecutive-integer node line
+// (moved verbatim from sub_protocols::air_sumcheck_skip in pw13-3 V1 so the
+// WHIR product-skip kernel can share them; behavior is bit-identical).
+//
+//   init:    right-edge triangle — after it, `rows[i*width..]` holds
+//            `Δ^{n_rows−1−i} p(i)` (each difference order anchored at its
+//            rightmost available node); one advance yields the next node;
+//   advance: for i in 1..n_rows { row_i += row_{i−1} } — the value row at the
+//            next consecutive node is then row_{n_rows−1}, readable in place.
+// Both passes are forward-sequential over the flattened row-major buffer.
+// ---------------------------------------------------------------------------
+
+/// In-place right-edge forward-difference triangle over `n_rows` rows of
+/// `width` values (`rows[i * width + c]` = value row at the i-th consecutive
+/// node). Cost: width · n_rows(n_rows−1)/2 subs, once per group.
+#[inline]
+pub fn fd_init_in_place<T: PrimeCharacteristicRing + Copy>(rows: &mut [T], n_rows: usize, width: usize) {
+    debug_assert!(rows.len() >= n_rows * width);
+    for j in 1..n_rows {
+        for idx in 0..(n_rows - j) * width {
+            rows[idx] = rows[idx + width] - rows[idx];
+        }
+    }
+}
+
+/// Advances the FD state one node: `width · (n_rows − 1)` adds. The value row
+/// at the new node is `rows[(n_rows − 1) * width ..]`.
+#[inline]
+pub fn fd_advance<T: PrimeCharacteristicRing + Copy>(rows: &mut [T], n_rows: usize, width: usize) {
+    debug_assert!(rows.len() >= n_rows * width);
+    for idx in width..n_rows * width {
+        let prev = rows[idx - width];
+        rows[idx] += prev;
+    }
 }
 
 /// All evaluation nodes of the skip-round polynomial: the `2^k` window nodes
