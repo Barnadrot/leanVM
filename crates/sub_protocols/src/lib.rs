@@ -14,6 +14,7 @@ pub use quotient_gkr::*;
 pub mod shout_binding;
 pub mod memory_binding;
 pub mod bytecode_binding;
+pub mod poseidon_gkr;
 
 pub(crate) const MIN_VARS_FOR_PACKING: usize = 8;
 pub const N_VARS_TO_SEND_GKR_COEFFS: usize = 5;
