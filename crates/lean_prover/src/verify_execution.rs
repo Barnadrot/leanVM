@@ -301,9 +301,6 @@ pub fn verify_execution(
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));
     let public_memory_eval = public_input.evaluate(&public_memory_random_point);
 
-    let num_whir_statements = total_whir_statements();
-    eprintln!("  WHIR: num_whir_statements={num_whir_statements} expected={}", total_whir_statements());
-
     let previous_statements = vec![
         SparseStatement::new(
             parsed_commitment.num_variables,
