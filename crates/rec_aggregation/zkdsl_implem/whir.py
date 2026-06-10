@@ -14,18 +14,6 @@ WHIR_ALL_POTENTIAL_NUM_OODS = WHIR_ALL_POTENTIAL_NUM_OODS_PLACEHOLDER
 WHIR_ALL_POTENTIAL_FOLDING_GRINDING = WHIR_ALL_POTENTIAL_FOLDING_GRINDING_PLACEHOLDER
 MIN_STACKED_N_VARS = MIN_STACKED_N_VARS_PLACEHOLDER
 
-# WHIR uniskip (pw13 h8): the first WHIR_SKIP_K variables of the INITIAL folding sumcheck are
-# bound by ONE univariate challenge r0 over the integer window {0..2^K−1} (same window, K and
-# Lagrange-denominator constants as the AIR skip). Mirrors python-verifier
-# verify_whir_initial_sumcheck_with_skip and sumcheck::verify_product_sumcheck_with_skip.
-WHIR_SKIP_K = SKIP_K_PLACEHOLDER
-WHIR_SKIP_WINDOW = 2**WHIR_SKIP_K
-WHIR_SKIP_N_COEFFS = 2 * (WHIR_SKIP_WINDOW - 1) + 1
-WHIR_SKIP_POWER_SUMS = WHIR_SKIP_POWER_SUMS_PLACEHOLDER  # [S_m = Σ_{j<2^K} j^m; canonical]
-WHIR_SKIP_LAGRANGE_C = SKIP_LAGRANGE_C_PLACEHOLDER  # [(Π_{y≠x}(x−y))^{-1}; 2^K] (shared with AIR skip)
-WHIR_SKIP_TAIL_VARS = WHIR_INITIAL_FOLDING_FACTOR - WHIR_SKIP_K
-WHIR_INITIAL_SUMCHECK_CHALLENGES = WHIR_SKIP_TAIL_VARS + 1
-
 
 def whir_open(
     prev_fs,
@@ -49,46 +37,22 @@ def whir_open(
     all_stir_points = Array(n_rounds + 1)
     all_combination_randomness_powers = Array(n_rounds)
 
-    # h8: per-round CHALLENGE counts (round 0 binds WHIR_INITIAL_FOLDING_FACTOR variables with
-    # only WHIR_INITIAL_SUMCHECK_CHALLENGES challenges: [r0, then the 3 linear ones]).
-    challenge_counts = Array(n_rounds + 1)
-    challenge_counts[0] = WHIR_INITIAL_SUMCHECK_CHALLENGES
-    for i in range(1, n_rounds + 1):
-        challenge_counts[i] = WHIR_SUBSEQUENT_FOLDING_FACTOR
-
     carry = Array((n_rounds + 1) * 4)
-    # Round 0 hoisted out of the loop (uniskip variant); its outputs seed carry[4..8] exactly as
-    # the legacy r=0 iteration would have.
-    fs0: Mut = prev_fs
-    (
-        fs0,
-        all_folding_randomness[0],
-        all_ood_points[0],
-        root0,
-        all_stir_points[0],
-        all_combination_randomness_powers[0],
-        claimed_sum_0_out,
-        whir_skip_l16,
-    ) = whir_round_initial(
-        fs0,
-        prev_root,
-        num_queries[0],
-        n_vars + initial_log_inv_rate,
-        prev_claimed_sum,
-        query_grinding_bits[0],
-        num_oods[1],
-        folding_grinding[0],
-    )
-    carry[4] = fs0
-    carry[5] = root0
-    carry[6] = claimed_sum_0_out
-    carry[7] = n_vars + initial_log_inv_rate - WHIR_FIRST_RS_REDUCTION_FACTOR
-    for r in range(1, n_rounds):
+    carry[0] = prev_fs
+    carry[1] = prev_root
+    carry[2] = prev_claimed_sum
+    carry[3] = n_vars + initial_log_inv_rate
+    for r in range(0, n_rounds):
         base = r * 4
         fs: Mut = carry[base]
         root: Mut = carry[base + 1]
         claimed_sum: Mut = carry[base + 2]
         domain_sz: Mut = carry[base + 3]
+        is_first_round: Imm
+        if r == 0:
+            is_first_round = 1
+        else:
+            is_first_round = 0
         (
             fs,
             all_folding_randomness[r],
@@ -102,7 +66,7 @@ def whir_open(
             root,
             folding_factors[r],
             two_exp(folding_factors[r]),
-            0,
+            is_first_round,
             num_queries[r],
             domain_sz,
             claimed_sum,
@@ -110,7 +74,10 @@ def whir_open(
             num_oods[r + 1],
             folding_grinding[r],
         )
-        domain_sz -= 1
+        if r == 0:
+            domain_sz -= WHIR_FIRST_RS_REDUCTION_FACTOR
+        else:
+            domain_sz -= 1
         carry[base + 4] = fs
         carry[base + 5] = root
         carry[base + 6] = claimed_sum
@@ -157,38 +124,26 @@ def whir_open(
 
     fs, all_folding_randomness[n_rounds + 1], end_sum = sumcheck_verify(fs, n_final_vars, claimed_sum, 2)
 
-    # h8: the global challenge vector has n_vars − WHIR_SKIP_K + 1 entries: slot 0 = r0 (binding
-    # the first WHIR_SKIP_K variables), slot s ≥ 1 ↔ variable s + WHIR_SKIP_K − 1.
-    folding_randomness_global = Array((n_vars - WHIR_SKIP_K + 1) * DIM)
+    folding_randomness_global = Array(n_vars * DIM)
 
     start_buf = Array(n_rounds + 2)
     start_buf[0] = folding_randomness_global
     for i in range(0, n_rounds + 1):
         start: Mut = start_buf[i]
-        for j in range(0, challenge_counts[i]):
+        for j in range(0, folding_factors[i]):
             copy_ef(all_folding_randomness[i] + j * DIM, start + j * DIM)
-        start += challenge_counts[i] * DIM
+        start += folding_factors[i] * DIM
         start_buf[i + 1] = start
     start = start_buf[n_rounds + 1]
     for j in range(0, n_final_vars):
         copy_ef(all_folding_randomness[n_rounds + 1] + j * DIM, start + j * DIM)
 
-    # h8: commitment OODs are round-0 statements with dense points — under the skip their
-    # weight is Σ_j L16[j]·eq(p, bits4(j) ∥ chal[1:]), which factors as
-    # MLE(L16)(p[0..K]) · eq(p[K..], chal[1:]) (the head sum of an eq weight is the MLE of the
-    # Lagrange table at the point's head coords). Mirrors the python spec's round_weights at
-    # round 0 applied to dense points.
     all_ood_recovered_evals = Array(num_oods[0] * DIM)
     for i in range(0, num_oods[0]):
         expanded_from_univariate = expand_from_univariate_ext(ood_points_commit + i * DIM, n_vars)
-        ood_head_tbl = compute_eq_mle_extension(expanded_from_univariate, WHIR_SKIP_K)
-        ood_head = dot_product_ee_ret(whir_skip_l16, ood_head_tbl, WHIR_SKIP_WINDOW)
-        ood_tail = poly_eq_extension_dynamic_ret(
-            expanded_from_univariate + WHIR_SKIP_K * DIM,
-            folding_randomness_global + DIM,
-            n_vars - WHIR_SKIP_K,
+        poly_eq_extension_dynamic_to(
+            expanded_from_univariate, folding_randomness_global, all_ood_recovered_evals + i * DIM, n_vars
         )
-        mul_extension(ood_head, ood_tail, all_ood_recovered_evals + i * DIM)
     ood_eval_sum = Array(DIM)
     dot_product_ee_dynamic(
         all_ood_recovered_evals,
@@ -209,9 +164,7 @@ def whir_open(
         n_vars_remaining -= folding_factors[i]
         my_ood_recovered_evals = Array(num_oods[i + 1] * DIM)
         combination_randomness_powers = all_combination_randomness_powers[i]
-        # h8: advance by the CHALLENGE count (4 for round 0, not 7); after round 0 the remaining
-        # suffix is one-challenge-per-variable again, so every later pairing is pure tensor.
-        my_folding_randomness += challenge_counts[i] * DIM
+        my_folding_randomness += folding_factors[i] * DIM
         for j in range(0, num_oods[i + 1]):
             expanded_from_univariate = expand_from_univariate_ext(all_ood_points[i] + j * DIM, n_vars_remaining)
             poly_eq_extension_dynamic_to(
@@ -250,7 +203,7 @@ def whir_open(
     )
     # copy_ef(mul_extension_ret(eval_weights, final_value), end_sum);
 
-    return fs, folding_randomness_global, eval_weights, final_value, end_sum, whir_skip_l16
+    return fs, folding_randomness_global, eval_weights, final_value, end_sum
 
 
 def sumcheck_verify(fs, n_steps, claimed_sum, degree: Const):
@@ -433,151 +386,6 @@ def sample_stir_indexes_and_fold(
             dot_product_ee_dynamic(merkle_leaves[i], poly_eq, folds + i * DIM, two_pow_folding_factor)
 
     return fs, stir_points, folds
-
-
-def whir_skip_lagrange_weights(r0):
-    # L_x(r0) = c_x · Π_{y≠x}(r0 − y) over the window {0..2^K−1}; c_x = WHIR_SKIP_LAGRANGE_C are
-    # build-time-inverted constant denominators — no in-circuit inversion (same pattern as the
-    # AIR skip in recursion.py).
-    diffs = Array(WHIR_SKIP_WINDOW)
-    for x in unroll(0, WHIR_SKIP_WINDOW):
-        diffs[x] = sub_extension_base_ret(r0, x)
-    pre = Array(WHIR_SKIP_WINDOW)
-    suf = Array(WHIR_SKIP_WINDOW)
-    pre[0] = ONE_EF_PTR
-    suf[WHIR_SKIP_WINDOW - 1] = ONE_EF_PTR
-    for x in unroll(1, WHIR_SKIP_WINDOW):
-        pre[x] = mul_extension_ret(pre[x - 1], diffs[x - 1])
-        rev = WHIR_SKIP_WINDOW - 1 - x
-        suf[rev] = mul_extension_ret(suf[rev + 1], diffs[rev + 1])
-    weights = Array(WHIR_SKIP_WINDOW * DIM)
-    for x in unroll(0, WHIR_SKIP_WINDOW):
-        mul_extension(mul_base_extension_ret(WHIR_SKIP_LAGRANGE_C[x], pre[x]), suf[x], weights + x * DIM)
-    return weights
-
-
-def whir_initial_sumcheck_with_skip(prev_fs, claimed_sum, folding_grinding_bits):
-    # h8: rounds 0..WHIR_SKIP_K−1 of the initial folding sumcheck become ONE univariate round.
-    # FS order (mirrors sumcheck::verify_product_sumcheck_with_skip): absorb the FULL 31-coeff
-    # vector v'(X) → grind → sample r0. Round-0 identity: dot(coeffs, S_m) == claimed_sum
-    # (plain window sum, no ê). New target = v'(r0). Then WHIR_SKIP_TAIL_VARS standard rounds.
-    fs: Mut = prev_fs
-    fs, skip_coeffs = fs_receive_ef_inlined(fs, WHIR_SKIP_N_COEFFS)
-    s_consts = Array(WHIR_SKIP_N_COEFFS)
-    for j in unroll(0, WHIR_SKIP_N_COEFFS):
-        s_consts[j] = WHIR_SKIP_POWER_SUMS[j]
-    window_dot = Array(DIM)
-    dot_product_be(s_consts, skip_coeffs, window_dot, WHIR_SKIP_N_COEFFS)
-    copy_ef(window_dot, claimed_sum)  # write-once equality: the round-0 window identity
-    fs = fs_grinding(fs, folding_grinding_bits)
-    fs, r0 = fs_sample_ef(fs)
-    r0_powers = powers_const(r0, WHIR_SKIP_N_COEFFS)
-    target = dot_product_ee_ret(skip_coeffs, r0_powers, WHIR_SKIP_N_COEFFS)
-    fs, rest, final_sum = sumcheck_verify_with_grinding(fs, WHIR_SKIP_TAIL_VARS, target, 2, folding_grinding_bits)
-    challenges = Array(WHIR_INITIAL_SUMCHECK_CHALLENGES * DIM)
-    copy_ef(r0, challenges)
-    for j in unroll(0, WHIR_SKIP_TAIL_VARS):
-        copy_ef(rest + j * DIM, challenges + (j + 1) * DIM)
-    return fs, challenges, final_sum
-
-
-def sample_stir_indexes_and_fold_initial(prev_fs, num_queries, domain_size, prev_root, folding_randomness, query_grinding_bits):
-    # h8 round-0 leaf fold: leaf slot m holds the global TOP-7 index bits big-endian. The top
-    # WHIR_SKIP_K bits (block j = m >> WHIR_SKIP_TAIL_VARS) are bound by r0 via Lagrange weights,
-    # the lower WHIR_SKIP_TAIL_VARS bits by the linear challenges (eval_eq big-endian):
-    # poly_eq[m] = L16[m >> t]·eq_tail[m & (2^t−1)], j-major — mirrors whir::uniskip::skip_leaf_weights.
-    fs: Mut = prev_fs
-    folded_domain_size = domain_size - WHIR_INITIAL_FOLDING_FACTOR
-
-    fs = fs_grinding(fs, query_grinding_bits)
-    sampled, fs = fs_sample_queries(fs, num_queries)
-
-    merkle_leaves = Array(num_queries)
-    stir_points = Array(num_queries)
-
-    decompose_and_verify_merkle_batch(
-        num_queries,
-        sampled,
-        prev_root,
-        folded_domain_size,
-        2**WHIR_INITIAL_FOLDING_FACTOR / DIGEST_LEN,
-        stir_points,
-        merkle_leaves,
-    )
-
-    lagrange16 = whir_skip_lagrange_weights(folding_randomness)
-    eq_tail = compute_eq_mle_extension(folding_randomness + DIM, WHIR_SKIP_TAIL_VARS)
-    poly_eq = Array(2**WHIR_INITIAL_FOLDING_FACTOR * DIM)
-    for j in unroll(0, WHIR_SKIP_WINDOW):
-        for u in unroll(0, 2**WHIR_SKIP_TAIL_VARS):
-            mul_extension(
-                lagrange16 + j * DIM,
-                eq_tail + u * DIM,
-                poly_eq + (j * 2**WHIR_SKIP_TAIL_VARS + u) * DIM,
-            )
-
-    folds = Array(num_queries * DIM)
-    for i in range(0, num_queries):
-        dot_product_be_dynamic(merkle_leaves[i], poly_eq, folds + i * DIM, 2**WHIR_INITIAL_FOLDING_FACTOR)
-
-    return fs, stir_points, folds, lagrange16
-
-
-def whir_round_initial(
-    prev_fs,
-    prev_root,
-    num_queries,
-    domain_size,
-    claimed_sum,
-    query_grinding_bits,
-    num_ood,
-    folding_grinding_bits,
-):
-    # Round 0 of whir_open under the uniskip: identical to whir_round except (a) the initial
-    # sumcheck is the skip variant (4 challenges for 7 variables) and (b) the base-field leaf
-    # fold uses the L16 ⊗ eq_tail weight table. Also returns L16 (reused for every round-0
-    # statement-weight head sum downstream).
-    fs: Mut = prev_fs
-    fs, folding_randomness, new_claimed_sum_a = whir_initial_sumcheck_with_skip(
-        fs, claimed_sum, folding_grinding_bits
-    )
-
-    fs, root, ood_points, ood_evals = parse_commitment(fs, num_ood)
-
-    fs, stir_points, folds, lagrange16 = sample_stir_indexes_and_fold_initial(
-        fs,
-        num_queries,
-        domain_size,
-        prev_root,
-        folding_randomness,
-        query_grinding_bits,
-    )
-
-    fs = fs_duplex(fs)
-    fs, combination_randomness_gen = fs_sample_ef(fs)
-
-    combination_randomness_powers = powers(combination_randomness_gen, num_queries + num_ood)
-
-    claimed_sum_0 = Array(DIM)
-    dot_product_ee_dynamic(ood_evals, combination_randomness_powers, claimed_sum_0, num_ood)
-
-    claimed_sum_1 = Array(DIM)
-    dot_product_ee_dynamic(folds, combination_randomness_powers + num_ood * DIM, claimed_sum_1, num_queries)
-
-    new_claimed_sum_b = add_extension_ret(claimed_sum_0, claimed_sum_1)
-
-    final_sum = add_extension_ret(new_claimed_sum_a, new_claimed_sum_b)
-
-    return (
-        fs,
-        folding_randomness,
-        ood_points,
-        root,
-        stir_points,
-        combination_randomness_powers,
-        final_sum,
-        lagrange16,
-    )
 
 
 def whir_round(
