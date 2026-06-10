@@ -272,11 +272,9 @@ pub fn verify_batched_air_sumcheck_uniskip<EF: ExtensionField<PF<EF>>>(
 // Collapsing the K block bits (in any z-combination) preserves the legacy
 // post-round-K layout: chunks of size 2^{pivot−K} in the same `o` order.
 
-/// Compile-time skip width — canonical definition lives in
-/// `backend::sumcheck::univariate_skip` since pw13-3 V1 (shared with the WHIR
-/// product-skip); re-exported here so existing importers
-/// (`lean_prover`, `rec_aggregation::compilation`) keep working unchanged.
-pub use backend::UNIVARIATE_SKIP_K;
+/// Compile-time skip width. The kernels below take `k` as a runtime parameter
+/// (so tests can sweep 3..=5); the orchestration layer (T3) uses this constant.
+pub const UNIVARIATE_SKIP_K: usize = 4;
 pub const SKIP_DOMAIN: usize = 1 << UNIVARIATE_SKIP_K;
 
 /// Storage block (within a 2^pivot chunk) holding the window values of cube
@@ -570,8 +568,7 @@ where
 // elements) — pinned by `test_fd_extension_matches_lagrange` and by the entire
 // iter-1 test suite, which the FD path must satisfy unchanged.
 //
-// State convention (right-edge anchored, verified in `fd_tests` and in the
-// backend unit tests):
+// State convention (right-edge anchored, verified in `fd_tests`):
 //   init:    for j in 1..n_rows { for i in 0..n_rows−j { row_i ← row_{i+1} − row_i } }
 //            after which row_{n_rows−1} = value at the LAST sampled node and
 //            row_{n_rows−1−j} holds the j-th forward difference Δʲ anchored so
@@ -579,12 +576,31 @@ where
 //   advance: for i in 1..n_rows { row_i += row_{i−1} } — the value row at the
 //            next consecutive node is then row_{n_rows−1}, readable in place.
 // Both passes are forward-sequential over the flattened row-major buffer.
-//
-// `fd_init_in_place` / `fd_advance` moved VERBATIM to
-// `backend::sumcheck::univariate_skip` (pw13-3 V1) so the WHIR product-skip
-// kernel shares them; they arrive here via `use backend::*`. Behavior (and
-// every kernel output) is bit-identical.
 // ---------------------------------------------------------------------------
+
+/// In-place right-edge forward-difference triangle over `n_rows` rows of
+/// `width` values (`rows[i * width + c]` = value row at the i-th consecutive
+/// node). Cost: width · n_rows(n_rows−1)/2 subs, once per group.
+#[inline]
+fn fd_init_in_place<T: PrimeCharacteristicRing + Copy>(rows: &mut [T], n_rows: usize, width: usize) {
+    debug_assert!(rows.len() >= n_rows * width);
+    for j in 1..n_rows {
+        for idx in 0..(n_rows - j) * width {
+            rows[idx] = rows[idx + width] - rows[idx];
+        }
+    }
+}
+
+/// Advances the FD state one node: `width · (n_rows − 1)` adds. The value row
+/// at the new node is `rows[(n_rows − 1) * width ..]`.
+#[inline]
+fn fd_advance<T: PrimeCharacteristicRing + Copy>(rows: &mut [T], n_rows: usize, width: usize) {
+    debug_assert!(rows.len() >= n_rows * width);
+    for idx in width..n_rows * width {
+        let prev = rows[idx - width];
+        rows[idx] += prev;
+    }
+}
 
 /// Gathers, for one packed rest-position `j_p`, the `2^k` window values of all
 /// columns into `win` (layout `win[x * n_cols + c]`, contiguous per window
