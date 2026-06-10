@@ -27,13 +27,6 @@ MIN_LOG_MEMORY_SIZE, MAX_LOG_MEMORY_SIZE = 16, 26
 MIN_LOG_HEIGHT_PER_TABLE, MIN_BYTECODE_LOG_SIZE, MAX_BYTECODE_LOG_SIZE = 8, 8, 22
 N_VARS_TO_SEND_GKR_COEFFS = 5
 SKIP_K = 4  # univariate-skip width of the batched AIR sumcheck; must equal sub_protocols::UNIVARIATE_SKIP_K (Rust)
-# h8: the WHIR initial folding sumcheck also uses the univariate skip (same SKIP_K).
-# Full coefficient vector of v'(X) = Σ_rest f(X,rest)·w(X,rest), degree ≤ 2·(2^SKIP_K − 1):
-WHIR_SKIP_N_COEFFS = 2 * (2**SKIP_K - 1) + 1
-# Window power sums S_m = Σ_{j<2^SKIP_K} j^m (0^0 = 1, so S_0 = 2^SKIP_K); round-0 identity is dot(coeffs, S) == target.
-WHIR_SKIP_POWER_SUMS = [EF(sum(j**m for j in range(2**SKIP_K)) % P) for m in range(WHIR_SKIP_N_COEFFS)]
-# The skip yields [r0, r_SKIP_K, ...]: 1 + (folding_factor_0 − SKIP_K) challenges for the initial window.
-WHIR_INITIAL_SUMCHECK_CHALLENGES = WHIR_INITIAL_FOLDING_FACTOR - SKIP_K + 1
 
 N_RUNTIME_COLUMNS, N_INSTRUCTION_COLUMNS = 8, 12
 
@@ -370,33 +363,6 @@ def verify_sumcheck(fiat_shamir: FiatShamir, target: EF, n_rounds: int, degree: 
     return point, target
 
 
-def lagrange_weights_over_window(r0: EF, window: int) -> list[EF]:
-    """Lagrange basis L_x(r0) over the integer nodes {0..window−1} (node for cube point x is x itself)."""
-    nodes = [EF(x) for x in range(window)]
-    return [
-        math.prod(r0 - nodes[j] for j in range(window) if j != i)
-        * math.prod(nodes[i] - nodes[j] for j in range(window) if j != i).inv()
-        for i in range(window)
-    ]
-
-
-def verify_whir_initial_sumcheck_with_skip(fiat_shamir: FiatShamir, target: EF, fold_pow_bits: int) -> tuple[list[EF], EF]:
-    """Univariate skip on the FIRST WHIR folding sumcheck (h8; mirrors
-    sumcheck::verify_product_sumcheck_with_skip). The first SKIP_K of the
-    WHIR_INITIAL_FOLDING_FACTOR variables are bound by ONE challenge r0: the prover sends
-    the full coefficient vector of v'(X) = Σ_rest f(X,rest)·w(X,rest) (read BEFORE pow/sample);
-    the round-0 identity is the plain window sum Σ_{j<2^SKIP_K} v'(j) == target, checked as
-    dot(coeffs, S_m) against the power-sum constants; then target ← v'(r0) (Horner) and the
-    remaining rounds are standard. Returns ([r0, r_SKIP_K, ...], final target)."""
-    coeffs = fiat_shamir.next_extension_scalars_vec(WHIR_SKIP_N_COEFFS)
-    assert dot_product(coeffs, WHIR_SKIP_POWER_SUMS) == target, "WHIR skip round: window identity failed"
-    fiat_shamir.check_pow_grinding(fold_pow_bits)
-    r0 = fiat_shamir.sample_ef()
-    target = eval_univariate_polynomial(coeffs, r0)
-    rest, target = verify_sumcheck(fiat_shamir, target, WHIR_INITIAL_FOLDING_FACTOR - SKIP_K, 2, fold_pow_bits)
-    return [r0] + rest, target
-
-
 def verify_air_sumcheck_with_skip(
     fiat_shamir: FiatShamir,
     table_sums: list[EF],
@@ -421,7 +387,13 @@ def verify_air_sumcheck_with_skip(
     claimed = sum(EF(1 << (n_max - n_t)) * s_t for n_t, s_t in zip(table_n_vars, table_sums))
     assert window_sum == claimed, "AIR skip round: weighted window identity failed"
     r0 = fiat_shamir.sample_ef()
-    lagrange_weights = lagrange_weights_over_window(r0, window)
+    # Lagrange basis L_x(r0) over the window nodes
+    nodes = [EF(x) for x in range(window)]
+    lagrange_weights = [
+        math.prod(r0 - nodes[j] for j in range(window) if j != i)
+        * math.prod(nodes[i] - nodes[j] for j in range(window) if j != i).inv()
+        for i in range(window)
+    ]
     target = dot_product(e_hat, lagrange_weights) * eval_univariate_polynomial(coeffs, r0)  # = ê(r0)·P(r0)
     linear_challenges, final_value = verify_sumcheck(fiat_shamir, target, n_max - SKIP_K, max_full_degree)
     return r0, lagrange_weights, linear_challenges, final_value
@@ -454,10 +426,7 @@ def verify_whir(
                 target += gamma_power * value
                 gamma_power *= gamma
         round_constraints.append((gamma, constraints))
-        if round == 0:  # h8: the univariate skip binds the first SKIP_K variables of the initial window
-            sc_point, target = verify_whir_initial_sumcheck_with_skip(fiat_shamir, target, fold_pow_bits)
-        else:
-            sc_point, target = verify_sumcheck(fiat_shamir, target, folding_factor, 2, fold_pow_bits)
+        sc_point, target = verify_sumcheck(fiat_shamir, target, folding_factor, 2, fold_pow_bits)
         folding_challenges += sc_point
         current_vars -= folding_factor
         is_final = round == n_rounds
@@ -476,16 +445,7 @@ def verify_whir(
             merkle_verify_path(commitment.root, log_height, idx, op.leaf_data, op.path)
             # Round 0 leaves are raw base-field elements; later rounds embed DIM Fp values per EF element.
             leaf = op.leaf_data if round == 0 else embed_ef(op.leaf_data)
-            if round == 0:
-                # h8 skip leaf fold: leaf index m holds the global TOP-folding_factor bits big-endian;
-                # the top SKIP_K bits (block j = m >> t) are bound by r0 with Lagrange weights, the
-                # lower t = folding_factor − SKIP_K bits by fr[1:] (eval_eq big-endian): j-major weights.
-                fr = folding_challenges[-WHIR_INITIAL_SUMCHECK_CHALLENGES:]
-                lagrange16, eq_tail = lagrange_weights_over_window(fr[0], 1 << SKIP_K), eval_eq(fr[1:])
-                t = folding_factor - SKIP_K
-                leaf_eval = sum(lagrange16[m >> t] * eq_tail[m & ((1 << t) - 1)] * leaf[m] for m in range(len(leaf)))
-            else:
-                leaf_eval = eval_multilinear_by_evals(leaf, folding_challenges[-folding_factor:])
+            leaf_eval = eval_multilinear_by_evals(leaf, folding_challenges[-folding_factor:])
             point = expand_from_univariate(EF(pow(int(gen.value), idx, P)), current_vars)
             stir_constraints.append(SparseStatements(current_vars, point, [(0, leaf_eval)]))
 
@@ -505,37 +465,22 @@ def verify_whir(
     eval_weights = ZERO
     for round, (gamma, smts) in enumerate(round_constraints):
         if round > 0:
-            # h8: the initial block contributed WHIR_INITIAL_SUMCHECK_CHALLENGES coords (skip), later blocks one per round.
-            n_prev = WHIR_INITIAL_SUMCHECK_CHALLENGES if round == 1 else whir_folding_factor_at_round(round - 1)
-            folding_challenges = folding_challenges[n_prev:]
-
-        def round_weights(pt: list[EF]) -> EF:  # Σ_{stmt, value} γ-power-weighted statement weights of this round at pt
-            acc, gamma_power = ZERO, ONE
-            for smt in smts:
-                point_suffix = pt[len(pt) - smt.inner_num_variables :]  # dense part of the point
-                if smt.tail is None:
-                    eval_suffix = next_mle(smt.point, point_suffix) if smt.is_next else eq_poly(smt.point, point_suffix)
-                elif smt.is_next:
-                    eval_suffix = next_mle_with_tail(smt.point, smt.tail, point_suffix)
-                else:  # weight = eq(point, prefix) · MLE(tail) at the lowest log2(len(tail)) inner coords
-                    prefix, low = point_suffix[: len(smt.point)], point_suffix[len(smt.point) :]
-                    eval_suffix = eq_poly(smt.point, prefix) * eval_multilinear_by_evals(smt.tail, low)
-                sel_n = smt.selector_num_variables
-                for v in smt.values:
-                    eval_prefix = eq_at_index(pt, v[0], sel_n)  # sparse part of the point
-                    acc += eval_prefix * eval_suffix * gamma_power
-                    gamma_power *= gamma
-            return acc
-
-        if round == 0:
-            # h8: round-0 statement weights under the skip — the 16-term head sum
-            # Σ_j L_j(r0) · W(bits_SKIP_K(j) ∥ rest), exact for every statement shape
-            # (binding SKIP_K variables univariately is a linear functional of W).
-            lagrange16 = lagrange_weights_over_window(folding_challenges[0], 1 << SKIP_K)
-            bits = lambda j: [ONE if (j >> (SKIP_K - 1 - b)) & 1 else ZERO for b in range(SKIP_K)]
-            eval_weights += sum(lagrange16[j] * round_weights(bits(j) + folding_challenges[1:]) for j in range(1 << SKIP_K))
-        else:
-            eval_weights += round_weights(folding_challenges)
+            folding_challenges = folding_challenges[whir_folding_factor_at_round(round - 1) :]
+        gamma_power = ONE
+        for smt in smts:
+            point_suffix = folding_challenges[len(folding_challenges) - smt.inner_num_variables :]  # dense part of the point
+            if smt.tail is None:
+                eval_suffix = next_mle(smt.point, point_suffix) if smt.is_next else eq_poly(smt.point, point_suffix)
+            elif smt.is_next:
+                eval_suffix = next_mle_with_tail(smt.point, smt.tail, point_suffix)
+            else:  # weight = eq(point, prefix) · MLE(tail) at the lowest log2(len(tail)) inner coords
+                prefix, low = point_suffix[: len(smt.point)], point_suffix[len(smt.point) :]
+                eval_suffix = eq_poly(smt.point, prefix) * eval_multilinear_by_evals(smt.tail, low)
+            sel_n = smt.selector_num_variables
+            for v in smt.values:
+                eval_prefix = eq_at_index(folding_challenges, v[0], sel_n)  # sparse part of the point
+                eval_weights += eval_prefix * eval_suffix * gamma_power
+                gamma_power *= gamma
     final_value = eval_multilinear_by_coeffs(final_coeffs, list(reversed(final_sc_point)))
     assert final_sc_value == eval_weights * final_value, "WHIR final sumcheck check failed"
 
