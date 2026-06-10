@@ -14,5 +14,3 @@ tracing.workspace = true
 
 [dev-dependencies]
 koala-bear = { path = "../koala-bear", package = "koala-bear" }
-# ProverState needs a poseidon permutation for the V2 orchestration roundtrip tests
-symetric = { path = "../symetric", package = "symetric" }
