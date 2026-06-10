@@ -28,6 +28,10 @@ fn mds_air_16<A: PrimeCharacteristicRing + 'static>(state: &mut [A; WIDTH]) {
     unreachable!()
 }
 
+pub fn mds_dense_16_pub() -> &'static [[F; 16]; 16] {
+    mds_dense_16()
+}
+
 fn mds_dense_16() -> &'static [[F; 16]; 16] {
     use std::sync::OnceLock;
     static MAT: OnceLock<[[KoalaBear; 16]; 16]> = OnceLock::new();

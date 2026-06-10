@@ -332,7 +332,7 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             sorted_seen.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")
         ));
 
-        num_cols_air.push(table.n_columns().to_string());
+        num_cols_air.push(table.n_committed_columns().to_string());
         n_air_columns.push(table.n_columns().to_string());
         n_air_shift_columns.push(table.n_shift_columns().to_string());
         n_air_constraints.push(table.n_constraints().to_string());
@@ -409,6 +409,119 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
         "TOTAL_WHIR_STATEMENTS_PLACEHOLDER".to_string(),
         total_whir_statements().to_string(),
     );
+    // d=2 Shout binding constants
+    {
+        let n_committed_air_columns: Vec<String> = ALL_TABLES.iter().map(|t| t.n_committed_columns().to_string()).collect();
+        replacements.insert(
+            "N_COMMITTED_AIR_COLUMNS_PLACEHOLDER".to_string(),
+            format!("[{}]", n_committed_air_columns.join(", ")),
+        );
+        replacements.insert(
+            "N_COMMITTED_EXEC_COLUMNS_PLACEHOLDER".to_string(),
+            N_RUNTIME_COLUMNS.to_string(),
+        );
+        let one_buses_committed_cols: Vec<String> = ALL_TABLES.iter().map(|table| {
+            let mut seen_cols: std::collections::HashSet<ColIndex> = std::collections::HashSet::new();
+            for bus in table.bus_interactions() {
+                if !matches!(bus.multiplicity, BusMultiplicity::One) { continue; }
+                for entry in &bus.data {
+                    if let Some(col) = entry.column() { seen_cols.insert(col); }
+                }
+            }
+            let n_committed = table.n_committed_columns();
+            let mut committed: Vec<ColIndex> = seen_cols.into_iter().filter(|&c| c < n_committed).collect();
+            committed.sort();
+            format!("[{}]", committed.iter().map(usize::to_string).collect::<Vec<_>>().join(", "))
+        }).collect();
+        replacements.insert(
+            "ONE_BUSES_COMMITTED_COLS_PLACEHOLDER".to_string(),
+            format!("[{}]", one_buses_committed_cols.join(", ")),
+        );
+        let air_degrees: Vec<String> = ALL_TABLES.iter().map(|t| t.degree_air().to_string()).collect();
+        replacements.insert(
+            "AIR_DEGREES_PLACEHOLDER".to_string(),
+            format!("[{}]", air_degrees.join(", ")),
+        );
+    }
+    // Memory binding constants
+    {
+        use sub_protocols::memory_binding::{memory_binding_groups, total_memory_binding_groups, total_memory_bound_value_cols};
+        let n_mem_bind_groups_per_table: Vec<String> = ALL_TABLES
+            .iter()
+            .map(|t| memory_binding_groups(t).len().to_string())
+            .collect();
+        replacements.insert(
+            "N_MEM_BIND_GROUPS_PER_TABLE_PLACEHOLDER".to_string(),
+            format!("[{}]", n_mem_bind_groups_per_table.join(", ")),
+        );
+        replacements.insert(
+            "N_MEM_BIND_GROUPS_TOTAL_PLACEHOLDER".to_string(),
+            total_memory_binding_groups().to_string(),
+        );
+        replacements.insert(
+            "N_MEM_BIND_VALUE_COLS_TOTAL_PLACEHOLDER".to_string(),
+            total_memory_bound_value_cols().to_string(),
+        );
+        let mut mem_bind_value_cols_per_table: Vec<String> = Vec::new();
+        for table in ALL_TABLES.iter() {
+            let groups = memory_binding_groups(table);
+            let cols: Vec<String> = groups
+                .iter()
+                .flat_map(|g| g.value_cols.iter())
+                .map(|c| c.to_string())
+                .collect();
+            mem_bind_value_cols_per_table.push(format!("[{}]", cols.join(", ")));
+        }
+        replacements.insert(
+            "MEM_BIND_VALUE_COLS_PLACEHOLDER".to_string(),
+            format!("[{}]", mem_bind_value_cols_per_table.join(", ")),
+        );
+        replacements.insert(
+            "MEM_BIND_HALF_BITS_MAX_PLACEHOLDER".to_string(),
+            (MAX_LOG_MEMORY_SIZE / 2).to_string(),
+        );
+        replacements.insert(
+            "HALF_BITS_BC_PLACEHOLDER".to_string(),
+            (MAX_BYTECODE_LOG_SIZE / 2).to_string(),
+        );
+    }
+    // Poseidon GKR constants for in-circuit endpoint verification
+    {
+        let initial_rc = poseidon1_initial_constants();
+        let final_rc = poseidon1_final_constants();
+        let frc = poseidon1_sparse_first_round_constants();
+        let m_i = poseidon1_sparse_m_i();
+        let first_rows = poseidon1_sparse_first_row();
+        let v_vecs = poseidon1_sparse_v();
+        let scalar_rc = poseidon1_sparse_scalar_round_constants();
+        let mds = mds_dense_16_pub();
+
+        let f_to_s = |f: F| (f.as_canonical_u64() as u32).to_string();
+
+        let initial_flat: Vec<String> = initial_rc.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_INITIAL_RC_FLAT_PLACEHOLDER".to_string(), format!("[{}]", initial_flat.join(", ")));
+
+        let final_flat: Vec<String> = final_rc.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_FINAL_RC_FLAT_PLACEHOLDER".to_string(), format!("[{}]", final_flat.join(", ")));
+
+        let frc_flat: Vec<String> = frc.iter().map(|f| f_to_s(*f)).collect();
+        replacements.insert("POS_FRC_PLACEHOLDER".to_string(), format!("[{}]", frc_flat.join(", ")));
+
+        let m_i_flat: Vec<String> = m_i.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_M_I_FLAT_PLACEHOLDER".to_string(), format!("[{}]", m_i_flat.join(", ")));
+
+        let scalar_rc_flat: Vec<String> = scalar_rc.iter().map(|f| f_to_s(*f)).collect();
+        replacements.insert("POS_SCALAR_RC_PLACEHOLDER".to_string(), format!("[{}]", scalar_rc_flat.join(", ")));
+
+        let first_rows_flat: Vec<String> = first_rows.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_FIRST_ROWS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", first_rows_flat.join(", ")));
+
+        let v_vecs_flat: Vec<String> = v_vecs.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_V_VECS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", v_vecs_flat.join(", ")));
+
+        let mds_flat: Vec<String> = mds.iter().flat_map(|r| r.iter().map(|f| f_to_s(*f))).collect();
+        replacements.insert("POS_MDS_FLAT_PLACEHOLDER".to_string(), format!("[{}]", mds_flat.join(", ")));
+    }
     replacements.insert("STARTING_PC_PLACEHOLDER".to_string(), STARTING_PC.to_string());
     replacements.insert("ENDING_PC_PLACEHOLDER".to_string(), ending_pc.to_string());
 

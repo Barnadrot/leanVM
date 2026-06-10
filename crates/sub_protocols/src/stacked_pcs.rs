@@ -54,7 +54,7 @@ pub fn stacked_pcs_global_statements(
     let mut layout_offset = (2 << memory_n_vars) + (1 << bytecode_n_vars.max(max_table_n_vars));
     for (table, n_vars) in &tables_heights_sorted {
         table_offsets.insert(*table, layout_offset);
-        layout_offset += table.n_columns() << n_vars;
+        layout_offset += table.n_committed_columns() << n_vars;
     }
 
     let mut global_statements = previous_statements;
@@ -74,25 +74,24 @@ pub fn stacked_pcs_global_statements(
                 EF::from_usize(ending_pc),
             ));
         }
+        let n_committed = table.n_committed_columns();
         for (point, eq_values, next_values) in &committed_statements[&table] {
-            if !next_values.is_empty() {
-                global_statements.push(SparseStatement::new_next(
-                    stacked_n_vars,
-                    point.clone(),
-                    next_values
-                        .iter()
-                        .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
-                        .collect(),
-                ));
+            let committed_next: Vec<_> = next_values
+                .iter()
+                .filter(|&(&col_index, _)| col_index < n_committed)
+                .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
+                .collect();
+            if !committed_next.is_empty() {
+                global_statements.push(SparseStatement::new_next(stacked_n_vars, point.clone(), committed_next));
             }
-            global_statements.push(SparseStatement::new(
-                stacked_n_vars,
-                point.clone(),
-                eq_values
-                    .iter()
-                    .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
-                    .collect(),
-            ));
+            let committed_eq: Vec<_> = eq_values
+                .iter()
+                .filter(|&(&col_index, _)| col_index < n_committed)
+                .map(|(&col_index, &value)| SparseValue::new((offset >> n_vars) + col_index, value))
+                .collect();
+            if !committed_eq.is_empty() {
+                global_statements.push(SparseStatement::new(stacked_n_vars, point.clone(), committed_eq));
+            }
         }
     }
     global_statements
@@ -130,7 +129,7 @@ pub fn stack_polynomials_and_commit(
 
     for (table, log_n_rows) in &tables_heights_sorted {
         let n_rows = 1 << *log_n_rows;
-        for col_index in 0..table.n_columns() {
+        for col_index in 0..table.n_committed_columns() {
             let col = &traces[table].columns[col_index];
             global_polynomial[offset..][..n_rows].copy_from_slice(&col[..n_rows]);
             offset += n_rows;
@@ -190,7 +189,7 @@ fn compute_stacked_n_vars(
         + (1 << log_bytecode.max(max_table_log_n_rows))
         + tables_log_heights
             .iter()
-            .map(|(table, log_n_rows)| table.n_columns() << log_n_rows)
+            .map(|(table, log_n_rows)| table.n_committed_columns() << log_n_rows)
             .sum::<usize>();
     log2_ceil_usize(total_len)
 }
