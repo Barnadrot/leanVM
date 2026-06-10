@@ -495,7 +495,14 @@ pub fn prove_execution(
                 if l < sqrt_k_bc { combined_pf[sqrt_k_mem + l] += alpha_sel * eq_val; }
             }
         }
-        prover_state.add_extension_scalars(&combined_pf);
+        let pf_digest = {
+            let base_elems: Vec<F> = combined_pf.iter()
+                .flat_map(|ef| ef.as_basis_coefficients_slice())
+                .copied()
+                .collect();
+            backend::poseidon_hash_slice(&base_elems)
+        };
+        prover_state.add_base_scalars(&pf_digest);
         let c_pf: EF = prover_state.sample();
 
         let mut total_trace_rows = 0usize;

@@ -51,7 +51,6 @@ HALF_BITS_BC = HALF_BITS_BC_PLACEHOLDER
 SQRT_K_MEM = 2**MEM_BIND_HALF_BITS_MAX
 SQRT_K_BC = 2**HALF_BITS_BC
 PF_COMBINED_SIZE = SQRT_K_MEM + SQRT_K_BC
-PF_COMBINED_N_CHUNKS = div_ceil(PF_COMBINED_SIZE * DIM, DIGEST_LEN)
 N_COMMITTED_EXEC_COLUMNS = N_COMMITTED_EXEC_COLUMNS_PLACEHOLDER
 N_COMMITTED_AIR_COLUMNS = N_COMMITTED_AIR_COLUMNS_PLACEHOLDER
 ONE_BUSES_COMMITTED_COLS = ONE_BUSES_COMMITTED_COLS_PLACEHOLDER
@@ -518,7 +517,7 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
     # Unified binding GKR (ONE for all binding)
     fs = fs_duplex(fs)
     fs, _alpha_sel = fs_sample_ef(fs)
-    fs, _combined_pf = fs_receive_ef_runtime(fs, PF_COMBINED_SIZE, PF_COMBINED_N_CHUNKS)
+    fs, _pf_digest = fs_receive_chunks(fs, 1)
     fs, _c_pf = fs_sample_ef(fs)
 
     total_trace_rows: Mut = 0

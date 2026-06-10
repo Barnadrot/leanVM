@@ -257,7 +257,7 @@ pub fn verify_execution(
             let sqrt_k_mem = 1usize << half_bits;
             let half_bits_bc = HALF_BITS_BC.min(bytecode.log_size());
             let sqrt_k_bc = 1usize << half_bits_bc;
-            let _pushforward = verifier_state.next_extension_scalars_vec(sqrt_k_mem + sqrt_k_bc)?;
+            let _pf_digest = verifier_state.next_base_scalars_vec(8)?;
             let _c_pf: EF = verifier_state.sample();
 
             let mut total_trace_rows = 0usize;
