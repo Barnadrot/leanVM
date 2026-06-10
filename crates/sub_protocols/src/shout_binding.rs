@@ -10,9 +10,9 @@ use rayon::prelude::*;
 pub fn eq_bits_at_point(a: F, s: &[EF], n_bits: usize) -> EF {
     let a_val = a.to_usize();
     let mut result = EF::ONE;
-    for b in 0..n_bits.min(s.len()) {
+    for (b, s_b) in s.iter().enumerate().take(n_bits) {
         let bit = EF::from(F::from_usize((a_val >> b) & 1));
-        result *= bit * s[b] + (EF::ONE - bit) * (EF::ONE - s[b]);
+        result *= bit * *s_b + (EF::ONE - bit) * (EF::ONE - *s_b);
     }
     result
 }
@@ -366,13 +366,12 @@ pub fn eval_pushforward_mle(
     assert_eq!(pushforward.len(), 1 << n_vars);
 
     let mut table = pushforward.to_vec();
-    for i in 0..n_vars {
+    for r in &point[..n_vars] {
         let half = table.len() / 2;
-        let r = point[i];
         for j in 0..half {
             let lo = table[2 * j];
             let hi = table[2 * j + 1];
-            table[j] = lo + r * (hi - lo);
+            table[j] = lo + *r * (hi - lo);
         }
         table.truncate(half);
     }

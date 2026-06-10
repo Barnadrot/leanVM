@@ -14,6 +14,7 @@ pub use quotient_gkr::*;
 pub mod shout_binding;
 pub mod memory_binding;
 pub mod bytecode_binding;
+#[allow(clippy::needless_range_loop, clippy::if_same_then_else)]
 pub mod poseidon_gkr;
 
 pub(crate) const MIN_VARS_FOR_PACKING: usize = 8;

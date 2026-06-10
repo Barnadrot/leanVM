@@ -12,9 +12,11 @@ use rayon::prelude::*;
 const WIDTH: usize = 16;
 const N_TRANSITIONS: usize = 29;
 
+#[allow(clippy::upper_case_acronyms)]
 type PEF = EFPacking<EF>;
 const PACK_WIDTH: usize = <<F as Field>::Packing as PackedValue>::WIDTH;
 const RAYON_CHUNK: usize = 256;
+#[allow(clippy::upper_case_acronyms)]
 type PBF = <F as Field>::Packing;
 const BF_PACK_WIDTH: usize = <PBF as PackedValue>::WIDTH;
 
@@ -57,6 +59,7 @@ pub fn compute_checkpoints_from_inputs(input_cols: &[&[F]], n_rows: usize) -> Ve
     compute_checkpoint_states_base(input_cols, n_rows)
 }
 
+#[allow(clippy::uninit_vec)]
 fn compute_checkpoint_states_base(input_cols: &[&[F]], n_rows: usize) -> Vec<Vec<[F; WIDTH]>> {
     let c = poseidon_constants();
     let mut checkpoints: Vec<Vec<[F; WIDTH]>> = (0..N_TRANSITIONS + 1)

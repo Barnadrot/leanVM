@@ -102,10 +102,10 @@ pub fn compute_q_lo_d2(
                         let w = weighted[i];
                         if w.is_zero() { continue; }
                         let lo = addr.to_usize() & (s - 1);
-                        for k in 0..n_values {
+                        for (k, &gp_k) in gamma_powers_k.iter().enumerate().take(n_values) {
                             let target = lo + k;
                             if target < s {
-                                local_q[target] += gamma_powers_k[k] * w;
+                                local_q[target] += gp_k * w;
                             }
                         }
                     }
@@ -140,7 +140,7 @@ pub fn total_memory_binding_groups() -> usize {
 pub fn total_memory_bound_value_cols() -> usize {
     lean_vm::ALL_TABLES
         .iter()
-        .flat_map(|t| memory_binding_groups(t))
+        .flat_map(memory_binding_groups)
         .map(|g| g.value_cols.len())
         .sum()
 }
