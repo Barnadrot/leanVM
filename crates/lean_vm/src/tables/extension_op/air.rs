@@ -19,7 +19,7 @@ pub(super) const COL_ACC: usize = 8;
 // --- flat-only columns ---
 pub(super) const COL_IDX_RES: usize = 13;
 // d=2 address decomposition columns (committed, flat-only)
-// addr = addr_hi * 2^HALF_BITS + addr_lo, where HALF_BITS = MAX_LOG_MEMORY_SIZE / 2
+// addr = addr_hi * 2^MEM_HALF_BITS + addr_lo
 pub(super) const COL_IDX_A_HI: usize = 14;
 pub(super) const COL_IDX_A_LO: usize = 15;
 pub(super) const COL_IDX_B_HI: usize = 16;
@@ -114,7 +114,7 @@ impl<const BUS: bool> Air for ExtensionOpPrecompile<BUS> {
         let idx_r = flat[COL_IDX_RES];
 
         // d=2 address decomposition: addr = addr_hi * 2^HALF_BITS + addr_lo
-        let half_bits_modulus = AB::F::from_usize(1 << (crate::MAX_LOG_MEMORY_SIZE / 2));
+        let half_bits_modulus = AB::F::from_usize(1 << crate::MEM_HALF_BITS);
         let decomp_a = idx_a - flat[COL_IDX_A_HI] * half_bits_modulus - flat[COL_IDX_A_LO];
         let decomp_b = idx_b - flat[COL_IDX_B_HI] * half_bits_modulus - flat[COL_IDX_B_LO];
         let decomp_res = idx_r - flat[COL_IDX_RES_HI] * half_bits_modulus - flat[COL_IDX_RES_LO];

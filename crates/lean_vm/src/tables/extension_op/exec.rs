@@ -1,7 +1,7 @@
 use crate::DIMENSION;
 use crate::EF;
 use crate::F;
-use crate::MAX_LOG_MEMORY_SIZE;
+use crate::MEM_HALF_BITS;
 use crate::MemoryAccess;
 use crate::RunnerError;
 use crate::TableTrace;
@@ -169,7 +169,7 @@ pub(super) fn exec_multi_row(
         trace.columns[COL_IDX_RES].push(ptr_res);
 
         // d=2 address decomposition
-        let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+        let half_bits = MEM_HALF_BITS;
         let half_mask = (1usize << half_bits) - 1;
         let addr_a = idx_as[i].to_usize();
         let addr_b = idx_bs[i].to_usize();

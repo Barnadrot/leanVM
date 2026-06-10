@@ -303,7 +303,7 @@ pub fn prove_execution(
         );
 
         // Step 4: Per-table tensor decomposition
-        let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
+        let half_bits = MEM_HALF_BITS.min(log_memory);
         let s_lo = &s_point[..half_bits];
         let s_hi = &s_point[half_bits..log_memory];
 

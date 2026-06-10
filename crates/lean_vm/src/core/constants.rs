@@ -17,6 +17,7 @@ pub const MAX_WHIR_LOG_INV_RATE: usize = 4;
 /// Minimum and maximum memory size (as powers of two)
 pub const MIN_LOG_MEMORY_SIZE: usize = 16;
 pub const MAX_LOG_MEMORY_SIZE: usize = 26;
+pub const MEM_HALF_BITS: usize = 11;
 
 pub const MIN_BYTECODE_LOG_SIZE: usize = 8;
 pub const MAX_BYTECODE_LOG_SIZE: usize = 22;

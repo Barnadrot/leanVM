@@ -198,7 +198,7 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         *perm.multiplicity = F::ZERO;
         *perm.nu_b = F::from_usize(zero_vec_ptr);
         *perm.nu_c = F::from_usize(null_hash_ptr);
-        let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+        let half_bits = MEM_HALF_BITS;
         let half_mask = (1usize << half_bits) - 1;
         *perm.nu_c_hi = F::from_usize(null_hash_ptr >> half_bits);
         *perm.nu_c_lo = F::from_usize(null_hash_ptr & half_mask);
@@ -282,7 +282,7 @@ impl<const BUS: bool> TableT for Poseidon16Precompile<BUS> {
         trace.columns[POSEIDON_COL_ADDR_LEFT_HI].push(F::from_usize(left_second_addr));
         trace.columns[POSEIDON_COL_FLAG_PERMUTE].push(F::from_bool(permute));
         {
-            let half_bits = MAX_LOG_MEMORY_SIZE / 2;
+            let half_bits = MEM_HALF_BITS;
             let nu_c_val = index_res_a.to_usize();
             trace.columns[POSEIDON_COL_NU_C_HI].push(F::from_usize(nu_c_val >> half_bits));
             trace.columns[POSEIDON_COL_NU_C_LO].push(F::from_usize(nu_c_val & ((1 << half_bits) - 1)));
@@ -382,7 +382,7 @@ impl<const BUS: bool> Air for Poseidon16Precompile<BUS> {
         builder.assert_zero(one_minus_flag_left * (nu_a - cols.addr_left_lo));
 
         // d=2 NU_C decomposition: NU_C = NU_C_HI * 2^HALF_BITS + NU_C_LO
-        let half_bits_modulus = AB::F::from_usize(1usize << (MAX_LOG_MEMORY_SIZE / 2));
+        let half_bits_modulus = AB::F::from_usize(1usize << (MEM_HALF_BITS));
         builder.assert_zero(cols.nu_c - cols.nu_c_hi * half_bits_modulus - cols.nu_c_lo);
 
         eval_poseidon1_16(builder, &cols)

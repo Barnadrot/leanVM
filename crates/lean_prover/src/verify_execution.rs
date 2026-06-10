@@ -205,7 +205,7 @@ pub fn verify_execution(
                 &mut verifier_state, log_memory, batched_val,
             )?;
 
-            let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
+            let half_bits = MEM_HALF_BITS.min(log_memory);
 
             for table in ALL_TABLES {
                 let groups = memory_binding_groups(&table);
