@@ -497,6 +497,7 @@ dependencies = [
  "lean_compiler",
  "lean_vm",
  "rand",
+ "rayon",
  "rec_aggregation",
  "serde",
  "serde_json",

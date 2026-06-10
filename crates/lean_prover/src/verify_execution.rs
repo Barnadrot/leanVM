@@ -140,6 +140,7 @@ pub fn verify_execution(
     } = sumcheck_verify(&mut verifier_state, n_max, max_full_degree, initial_sum, None)?;
 
     let mut my_air_final_value = EF::ZERO;
+    let mut table_col_evals: BTreeMap<Table, Vec<EF>> = BTreeMap::new();
     for vd in &verify_data {
         let n_cols_total = vd.table.n_columns() + vd.table.n_shift_columns();
         let col_evals = verifier_state.next_extension_scalars_vec(n_cols_total)?;
@@ -164,14 +165,144 @@ pub fn verify_execution(
         let claim = delegate_to_inner!(&vd.table => split);
 
         committed_statements.get_mut(&vd.table).unwrap().push(claim);
+        table_col_evals.insert(vd.table, col_evals);
     }
 
     if my_air_final_value != claimed_air_final_value {
         return Err(ProofError::InvalidProof);
     }
 
+    // --- Post-AIR binding: Shout protocol (memory + bytecode) ---
+    {
+        use sub_protocols::memory_binding::*;
+        use sub_protocols::shout_binding;
+        let n_mem_groups = total_memory_binding_groups();
+
+        if n_mem_groups > 0 {
+            verifier_state.duplex();
+            let gamma: EF = verifier_state.sample();
+
+            let batched_val = verifier_state.next_extension_scalar()?;
+            let mut expected_batched_val = EF::ZERO;
+            let mut gamma_power = EF::ONE;
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                if groups.is_empty() { continue; }
+                let col_evals = &table_col_evals[&table];
+                for group in &groups {
+                    for &val_col in &group.value_cols {
+                        expected_batched_val += gamma_power * col_evals[val_col];
+                        gamma_power *= gamma;
+                    }
+                }
+            }
+            if expected_batched_val != batched_val {
+                return Err(ProofError::InvalidProof);
+            }
+
+            verifier_state.duplex();
+            let _shout_result = shout_binding::verify_shout_value_sumcheck(
+                &mut verifier_state, log_memory, batched_val,
+            )?;
+
+            let half_bits = (MAX_LOG_MEMORY_SIZE / 2).min(log_memory);
+
+            for table in ALL_TABLES {
+                let groups = memory_binding_groups(&table);
+                if groups.is_empty() { continue; }
+                let log_n = table_n_vars[&table];
+
+                let table_contrib = verifier_state.next_extension_scalar()?;
+                let _td_result = shout_binding::verify_tensor_decomp_sumcheck(
+                    &mut verifier_state, log_n, table_contrib,
+                )?;
+            }
+
+            // Bytecode binding
+            let exec_table = Table::execution();
+            if let Some(bc_range) = exec_table.bytecode_bound_columns() {
+                let log_bytecode_size = bytecode.log_size();
+                let n_bc_cols = bc_range.len();
+
+                verifier_state.duplex();
+                let gamma_bc: EF = verifier_state.sample();
+
+                let batched_instr_val = verifier_state.next_extension_scalar()?;
+                let col_evals = &table_col_evals[&exec_table];
+                let mut expected_bc_val = EF::ZERO;
+                let mut gp_bc = EF::ONE;
+                for k in 0..n_bc_cols {
+                    expected_bc_val += gp_bc * col_evals[bc_range.start + k];
+                    gp_bc *= gamma_bc;
+                }
+                if expected_bc_val != batched_instr_val {
+                    return Err(ProofError::InvalidProof);
+                }
+
+                verifier_state.duplex();
+                let _bc_shout = shout_binding::verify_shout_value_sumcheck(
+                    &mut verifier_state, log_bytecode_size, batched_instr_val,
+                )?;
+
+                let bc_pjoint_eval = verifier_state.next_extension_scalar()?;
+                let exec_log_n = table_n_vars[&exec_table];
+                let _bc_td = shout_binding::verify_tensor_decomp_sumcheck(
+                    &mut verifier_state, exec_log_n, bc_pjoint_eval,
+                )?;
+            }
+
+            // Unified GKR
+            verifier_state.duplex();
+            let _alpha_sel: EF = verifier_state.sample();
+            let sqrt_k_mem = 1usize << half_bits;
+            let half_bits_bc = HALF_BITS_BC.min(bytecode.log_size());
+            let sqrt_k_bc = 1usize << half_bits_bc;
+            let _pushforward = verifier_state.next_extension_scalars_vec(sqrt_k_mem + sqrt_k_bc)?;
+            let _c_pf: EF = verifier_state.sample();
+
+            let mut total_trace_rows = 0usize;
+            for table in ALL_TABLES {
+                if !memory_binding_groups(&table).is_empty() {
+                    total_trace_rows += 2 * (1usize << table_n_vars[&table]);
+                }
+            }
+            if exec_table.bytecode_bound_columns().is_some() {
+                total_trace_rows += 2 * (1usize << table_n_vars[&exec_table]);
+            }
+            let combined_size = (sqrt_k_mem + sqrt_k_bc + total_trace_rows).next_power_of_two();
+            let log_combined = log2_ceil_usize(combined_size);
+            let gkr_result = verify_gkr_quotient(&mut verifier_state, log_combined)?;
+            if !gkr_result.0.is_zero() {
+                return Err(ProofError::InvalidProof);
+            }
+            verifier_state.duplex();
+        }
+    }
+
+    // --- Poseidon GKR (Finding 1) ---
+    {
+        let poseidon_table = Table::poseidon16();
+        let pos_log_n = table_n_vars[&poseidon_table];
+
+        let (gkr_point_pos, _gkr_claimed, gkr_input_evals) =
+            sub_protocols::poseidon_gkr::verify_poseidon_gkr(
+                &mut verifier_state, pos_log_n,
+            )?;
+
+        let gkr_input_claim: BTreeMap<ColIndex, EF> = (0..16)
+            .map(|k| (POSEIDON_COL_INPUT_START + k, gkr_input_evals[k]))
+            .collect();
+        committed_statements.get_mut(&poseidon_table).unwrap().push(
+            (gkr_point_pos, gkr_input_claim, BTreeMap::new())
+        );
+        verifier_state.duplex();
+    }
+
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));
     let public_memory_eval = public_input.evaluate(&public_memory_random_point);
+
+    let num_whir_statements = total_whir_statements();
+    eprintln!("  WHIR: num_whir_statements={num_whir_statements} expected={}", total_whir_statements());
 
     let previous_statements = vec![
         SparseStatement::new(

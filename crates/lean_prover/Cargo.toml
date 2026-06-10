@@ -12,6 +12,7 @@ prox-gaps-conjecture = []
 [dependencies]
 xmss.workspace = true
 rand.workspace = true
+rayon.workspace = true
 tracing.workspace = true
 sub_protocols.workspace = true
 lean_vm.workspace = true

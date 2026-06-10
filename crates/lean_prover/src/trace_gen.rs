@@ -86,6 +86,8 @@ pub fn get_execution_trace(
         *trace_row[EXEC_COL_VALUE_B] = value_b;
         *trace_row[EXEC_COL_VALUE_C] = value_c;
         *trace_row[EXEC_COL_PC] = F::from_usize(pc);
+        *trace_row[EXEC_COL_PC_HI] = F::from_usize(pc >> HALF_BITS_BC);
+        *trace_row[EXEC_COL_PC_LO] = F::from_usize(pc & ((1 << HALF_BITS_BC) - 1));
         *trace_row[EXEC_COL_FP] = F::from_usize(fp);
         *trace_row[EXEC_COL_ADDR_A] = addr_a;
         *trace_row[EXEC_COL_ADDR_B] = addr_b;
