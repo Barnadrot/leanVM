@@ -65,14 +65,30 @@ pub fn compute_batched_memory(
 
 /// Fold a table in-place: table[j] = table[2j] + r * (table[2j+1] - table[2j])
 /// for j in 0..half. Truncates the table to half its size.
+///
+/// Uses parallel fold for large tables (>= 1024 pairs) to avoid sequential bottleneck.
 fn fold_table(table: &mut Vec<EF>, r: EF) {
     let half = table.len() / 2;
-    for j in 0..half {
-        let lo = table[2 * j];
-        let hi = table[2 * j + 1];
-        table[j] = lo + r * (hi - lo);
+    const PAR_FOLD_THRESHOLD: usize = 1024;
+    if half >= PAR_FOLD_THRESHOLD {
+        let folded: Vec<EF> = (0..half)
+            .into_par_iter()
+            .map(|j| {
+                let lo = table[2 * j];
+                let hi = table[2 * j + 1];
+                lo + r * (hi - lo)
+            })
+            .collect();
+        table.truncate(half);
+        table.copy_from_slice(&folded);
+    } else {
+        for j in 0..half {
+            let lo = table[2 * j];
+            let hi = table[2 * j + 1];
+            table[j] = lo + r * (hi - lo);
+        }
+        table.truncate(half);
     }
-    table.truncate(half);
 }
 
 /// Prove the Shout value sumcheck (degree 2, log(K) rounds).
@@ -161,6 +177,25 @@ pub fn verify_shout_value_sumcheck(
 ) -> Result<(EF, Vec<EF>), ProofError> {
     let eval = sumcheck_verify(verifier_state, n_vars, 2, claimed_sum, None)?;
     Ok((eval.value, eval.point.0))
+}
+
+/// Precompute eq(bits(k), s) for all k in 0..2^n_bits.
+///
+/// Returns a table where table[k] = eq(bits(k), s), built in O(2^n_bits) time
+/// using recursive doubling (vs O(n_bits * 2^n_bits) for per-element computation).
+pub fn precompute_eq_table(s: &[EF], n_bits: usize) -> Vec<EF> {
+    let size = 1usize << n_bits;
+    let mut table = EF::zero_vec(size);
+    table[0] = EF::ONE;
+    for b in 0..n_bits {
+        let s_b = s[b];
+        let one_minus_s_b = EF::ONE - s_b;
+        for k in (0..1usize << b).rev() {
+            table[k | (1 << b)] = table[k] * s_b;
+            table[k] = table[k] * one_minus_s_b;
+        }
+    }
+    table
 }
 
 /// Build eq tables for tensor decomposition:
@@ -387,11 +422,26 @@ mod tests {
     /// Compute eq(bits(index), point) by decomposing index into n_bits binary digits
     fn eq_index_at_point(index: usize, point: &[EF], n_bits: usize) -> EF {
         let mut result = EF::ONE;
-        for b in 0..n_bits.min(s.len()) {
+        for b in 0..n_bits.min(point.len()) {
             let bit = EF::from(F::from_usize((index >> b) & 1));
             result *= bit * point[b] + (EF::ONE - bit) * (EF::ONE - point[b]);
         }
         result
+    }
+
+    #[test]
+    fn test_precompute_eq_table() {
+        let mut rng = StdRng::seed_from_u64(1111);
+        let n_bits = 5;
+        let s: Vec<EF> = (0..n_bits).map(|_| rng.random()).collect();
+
+        let table = precompute_eq_table(&s, n_bits);
+        assert_eq!(table.len(), 1 << n_bits);
+
+        for k in 0..(1 << n_bits) {
+            let expected = eq_bits_at_point(F::from_usize(k), &s, n_bits);
+            assert_eq!(table[k], expected, "precompute_eq_table mismatch at k={k}");
+        }
     }
 
     #[test]

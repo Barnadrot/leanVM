@@ -310,6 +310,9 @@ pub fn prove_execution(
         let s_lo = &s_point[..half_bits];
         let s_hi = &s_point[half_bits..log_memory];
 
+        let eq_table_hi = shout_binding::precompute_eq_table(s_hi, s_hi.len());
+        let eq_table_lo = shout_binding::precompute_eq_table(s_lo, s_lo.len());
+
         struct TableDecomp<'a> {
             eq_row_prime: Vec<EF>,
             addr_col: &'a [F],
@@ -334,23 +337,34 @@ pub fn prove_execution(
             }
             let mut gp = table_gamma_offset;
 
+            let half_mask = (1usize << half_bits) - 1;
             for group in groups {
                 let addr_col = &trace.columns[group.addr_col];
-                for k in 0..group.value_cols.len() {
-                    let eq_pairs: Vec<(EF, EF)> = parallel::par_map_collect(n_rows, |i| {
-                        let addr_val = addr_col[i].to_usize() + k;
-                        let hi = addr_val >> half_bits;
-                        let lo = addr_val & ((1 << half_bits) - 1);
-                        let eq_hi = shout_binding::eq_bits_at_point(F::from_usize(hi), s_hi, half_bits);
-                        let eq_lo = shout_binding::eq_bits_at_point(F::from_usize(lo), s_lo, half_bits);
-                        (eq_hi, eq_lo)
-                    });
-                    for i in 0..n_rows {
-                        combined_eq_hi[i] += gp * eq_pairs[i].0;
-                        combined_eq_lo[i] += gp * eq_pairs[i].1;
-                    }
-                    gp *= gamma;
+                let n_vals = group.value_cols.len();
+                let mut gamma_powers = Vec::with_capacity(n_vals);
+                let mut g = gp;
+                for _ in 0..n_vals {
+                    gamma_powers.push(g);
+                    g *= gamma;
                 }
+
+                let partials: Vec<(EF, EF)> = parallel::par_map_collect(n_rows, |i| {
+                    let base_addr = addr_col[i].to_usize();
+                    let mut acc_hi = EF::ZERO;
+                    let mut acc_lo = EF::ZERO;
+                    for k in 0..n_vals {
+                        let addr_val = base_addr + k;
+                        acc_hi += gamma_powers[k] * eq_table_hi[addr_val >> half_bits];
+                        acc_lo += gamma_powers[k] * eq_table_lo[addr_val & half_mask];
+                    }
+                    (acc_hi, acc_lo)
+                });
+                parallel::par_for_each_mut2(
+                    &mut combined_eq_hi[..n_rows],
+                    &mut combined_eq_lo[..n_rows],
+                    |i, hi, lo| { *hi += partials[i].0; *lo += partials[i].1; },
+                );
+                gp = g;
             }
 
             let mut eq_r_fold = eq_r.clone();
@@ -426,10 +440,14 @@ pub fn prove_execution(
             let pc_lo_col = &traces[&exec_table].columns[EXEC_COL_PC_LO];
             let n_exec_rows = 1usize << exec_log_n;
 
-            let (eq_hi_table, eq_lo_table) = shout_binding::build_eq_addr_tables(
-                &pc_hi_col[..n_exec_rows], &pc_lo_col[..n_exec_rows],
-                bc_s_hi, bc_s_lo, half_bits_bc,
-            );
+            let eq_table_bc_hi = shout_binding::precompute_eq_table(bc_s_hi, bc_s_hi.len());
+            let eq_table_bc_lo = shout_binding::precompute_eq_table(bc_s_lo, bc_s_lo.len());
+            let eq_hi_table: Vec<EF> = parallel::par_map_collect(n_exec_rows, |row| {
+                eq_table_bc_hi[pc_hi_col[row].to_usize()]
+            });
+            let eq_lo_table: Vec<EF> = parallel::par_map_collect(n_exec_rows, |row| {
+                eq_table_bc_lo[pc_lo_col[row].to_usize()]
+            });
 
             let mut eq_r_bc_fold = eq_r_exec;
             let mut eq_hi_bc_fold = eq_hi_table;
