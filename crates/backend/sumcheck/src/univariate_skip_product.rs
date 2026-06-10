@@ -287,3 +287,138 @@ pub fn fold_product_skip<EF: ExtensionField<PF<EF>>>(
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// V2 — prove/verify orchestration for the WHIR initial sumcheck with a skip
+// round (pw13-3). Transcript discipline (must be mirrored by the python
+// verifier and the recursion circuit):
+//
+//   prover:   add_extension_scalars(v′ coeffs, FULL vector of 2(2^k−1)+1)
+//           → pow_grinding(pow_bits)                       (ONE event)
+//           → r0 = sample()
+//           → per linear round: add_sumcheck_polynomial(3 coeffs, c0 elided)
+//             → pow_grinding(pow_bits) → sample()           (legacy, verbatim)
+//
+//   verifier: next_extension_scalars_vec(2(2^k−1)+1)
+//           → window identity  dot(coeffs, S) == claimed_sum,
+//             S_m = Σ_{j<2^k} j^m   ([`window_power_sums`], base-field consts)
+//           → check_pow_grinding(pow_bits) → r0 = sample()
+//           → claimed_sum ← v′(r0)  (Horner)
+//           → per linear round: next_sumcheck_polynomial(3, ·, None)
+//             → check_pow_grinding → sample → claimed_sum ← h(r)
+//
+// The returned point is [r0, linear challenges in round order]; the legacy
+// `run_product_sumcheck` (used by bytecode_claims) is untouched.
+// ---------------------------------------------------------------------------
+
+use fiat_shamir::{FSProver, FSVerifier, ProofError, ProofResult};
+
+use crate::{ProductComputation, lagrange_weights_at, sumcheck_prove_many_rounds, window_power_sums};
+
+/// Skip round + `n_rounds − k` legacy product-sumcheck rounds.
+///
+/// Drop-in replacement for [`run_product_sumcheck`](crate::run_product_sumcheck)
+/// over the same operands when the first `k` variables are bound univariately.
+/// Returns `(point = [r0, r_{k}..], final sum, folded evals, folded weights)`;
+/// the folded operands have `n − n_rounds + (k − 1)`… i.e. each linear round
+/// halves once and the skip collapses `2^k → 1`, exactly like `n_rounds`
+/// legacy rounds would.
+pub fn run_product_sumcheck_with_skip<EF: ExtensionField<PF<EF>>>(
+    pol_a: &MleRef<'_, EF>, // evals
+    pol_b: &MleRef<'_, EF>, // weights
+    prover_state: &mut impl FSProver<EF>,
+    sum: EF,
+    k: usize,
+    n_rounds: usize,
+    pow_bits: usize,
+) -> (MultilinearPoint<EF>, EF, MleOwned<EF>, MleOwned<EF>) {
+    assert!(k >= 1 && n_rounds >= k);
+
+    // --- skip round: absorb full coefficient vector, grind ONCE, sample r0 ---
+    let skip_poly = compute_product_skip_poly(pol_a, pol_b, k, false);
+    debug_assert_eq!(
+        {
+            let s = window_power_sums::<PF<EF>>(k, skip_poly.coeffs.len());
+            skip_poly
+                .coeffs
+                .iter()
+                .zip(&s)
+                .map(|(&c, &sm)| c * sm)
+                .fold(EF::ZERO, |a, b| a + b)
+        },
+        sum,
+        "skip-round window identity must hold for the honest prover"
+    );
+    prover_state.add_extension_scalars(&skip_poly.coeffs);
+    prover_state.pow_grinding(pow_bits);
+    let r0: EF = prover_state.sample();
+    let sum = skip_poly.evaluate(r0);
+
+    let lagrange_at_r0 = lagrange_weights_at::<PF<EF>, EF>(k, r0);
+    let (folded_a, folded_b) = fold_product_skip(pol_a, pol_b, &lagrange_at_r0);
+
+    if n_rounds == k {
+        return (MultilinearPoint(vec![r0]), sum, folded_a, folded_b);
+    }
+
+    // --- linear rounds: identical to the legacy tail of run_product_sumcheck ---
+    let folded_group = match (folded_a, folded_b) {
+        (MleOwned::ExtensionPacked(a), MleOwned::ExtensionPacked(b)) => MleGroupOwned::ExtensionPacked(vec![a, b]),
+        (MleOwned::Extension(a), MleOwned::Extension(b)) => MleGroupOwned::Extension(vec![a, b]),
+        _ => unreachable!("fold_product_skip returns homogeneous extension variants"),
+    };
+    let (mut challenges, folds, final_sum) = sumcheck_prove_many_rounds(
+        folded_group,
+        None,
+        &ProductComputation {},
+        &vec![],
+        None,
+        prover_state,
+        sum,
+        None,
+        n_rounds - k,
+        false,
+        pow_bits,
+    );
+
+    challenges.splice(0..0, [r0]);
+    let [pol_a, pol_b] = folds.split().try_into().unwrap();
+    (challenges, final_sum, pol_a, pol_b)
+}
+
+/// Verifier half of [`run_product_sumcheck_with_skip`]. Mutates `claimed_sum`
+/// through the rounds (ending with the final target the caller must check
+/// against the folded oracle) and returns the point `[r0, r_{k}..]`.
+pub fn verify_product_sumcheck_with_skip<EF: ExtensionField<PF<EF>>>(
+    verifier_state: &mut impl FSVerifier<EF>,
+    claimed_sum: &mut EF,
+    k: usize,
+    n_rounds: usize,
+    pow_bits: usize,
+) -> ProofResult<MultilinearPoint<EF>> {
+    assert!(k >= 1 && n_rounds >= k);
+    let n_coeffs = 2 * ((1usize << k) - 1) + 1;
+
+    let coeffs = verifier_state.next_extension_scalars_vec(n_coeffs)?;
+    let s = window_power_sums::<PF<EF>>(k, n_coeffs);
+    let window_sum = coeffs.iter().zip(&s).map(|(&c, &sm)| c * sm).fold(EF::ZERO, |a, b| a + b);
+    if window_sum != *claimed_sum {
+        return Err(ProofError::InvalidProof);
+    }
+    verifier_state.check_pow_grinding(pow_bits)?;
+    let r0: EF = verifier_state.sample();
+    let skip_poly = DensePolynomial::new(coeffs);
+    *claimed_sum = skip_poly.evaluate(r0);
+
+    let mut point = Vec::with_capacity(1 + n_rounds - k);
+    point.push(r0);
+    for _ in 0..n_rounds - k {
+        let round_coeffs = verifier_state.next_sumcheck_polynomial(3, *claimed_sum, None)?;
+        let round_poly = DensePolynomial::new(round_coeffs);
+        verifier_state.check_pow_grinding(pow_bits)?;
+        let r: EF = verifier_state.sample();
+        *claimed_sum = round_poly.evaluate(r);
+        point.push(r);
+    }
+    Ok(MultilinearPoint(point))
+}
