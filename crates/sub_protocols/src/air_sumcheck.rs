@@ -174,12 +174,27 @@ where
             (MleGroupOwned::ExtensionPacked(cols), true) => {
                 // EFPacking is SoA; the in-chunk bit reversal permutes logical
                 // (lane-crossing) positions, so go through scalars per column.
+                // Outer loop sequential: unpack/pack are internally parallel
+                // and nested pool dispatch panics (T4' fix of a T2' latent bug).
                 let _span = info_span!("chunk-bit-reversing columns").entered();
-                let mut bit_reversed: Vec<ArenaVec<EFPacking<EF>>> = vec![ArenaVec::new(); cols.len()];
-                parallel::par_chunks_mut(&mut bit_reversed, 1, |i, out_slot| {
-                    let unpacked: Vec<EF> = unpack_extension(&cols[i]);
-                    out_slot[0] = pack_extension(&reverse_chunks(&unpacked));
-                });
+                let bit_reversed: Vec<ArenaVec<EFPacking<EF>>> = cols
+                    .iter()
+                    .map(|col| {
+                        let unpacked: Vec<EF> = unpack_extension(col);
+                        pack_extension(&reverse_chunks(&unpacked))
+                    })
+                    .collect();
+                MleGroup::Owned(MleGroupOwned::ExtensionPacked(bit_reversed))
+            }
+            (MleGroupOwned::Extension(cols), true) if cols[0].len() >= packing_width::<EF>() => {
+                // Unpacked input large enough for the packed phase: normalize
+                // to ExtensionPacked (the packed-phase fold schedule is NOT
+                // layout-compatible with unpacked storage — T4' fix of a T2'
+                // latent bug in the original catch-all arm; production folds
+                // are always ExtensionPacked here, but the API accepts both).
+                let _span = info_span!("chunk-bit-reversing columns").entered();
+                let bit_reversed: Vec<ArenaVec<EFPacking<EF>>> =
+                    cols.iter().map(|col| pack_extension(&reverse_chunks(col))).collect();
                 MleGroup::Owned(MleGroupOwned::ExtensionPacked(bit_reversed))
             }
             (folded, _) => {

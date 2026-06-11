@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::*;
-use backend::{Proof, RawProof, VerifierState};
+use backend::{Proof, RawProof, VerifierState, sub_block_lagrange_from_global, verify_univariate_skip_round};
 use lean_vm::*;
 use sub_protocols::*;
 
@@ -136,13 +136,27 @@ pub fn verify_execution(
     let max_full_degree = ALL_TABLES.iter().map(|t| t.degree_air() + 1).max().unwrap();
 
     let n_max = *table_n_vars.values().max().unwrap();
-    let Evaluation {
-        point: sumcheck_air_point,
-        value: claimed_air_final_value,
-    } = sumcheck_verify(&mut verifier_state, n_max, max_full_degree, initial_sum, None)?;
 
+    // Univariate skip round (plan_spec v2 §2.1 steps 1–2) followed by the
+    // remaining n_max − k multivariate rounds (step 3).
+    let k_skip = AIR_UNIVARIATE_SKIP;
+    let n_uni_coeffs = air_skip_n_uni_coeffs(max_full_degree, k_skip);
+    let skip = verify_univariate_skip_round(&mut verifier_state, k_skip, n_uni_coeffs, initial_sum)?;
+    let Evaluation {
+        point: c_post,
+        value: claimed_air_final_value,
+    } = sumcheck_verify(&mut verifier_state, n_max - k_skip, max_full_degree, skip.target, None)?;
+
+    fn bit_reverse(x: usize, bits: usize) -> usize {
+        if bits == 0 { 0 } else { x.reverse_bits() >> (usize::BITS as usize - bits) }
+    }
+
+    // AIR final check (§2.2): my_air_final_value = Σ_t κ_t·eq(β^x_t, x_nat_t)·C_t(fold_evals_t).
     let mut my_air_final_value = EF::ZERO;
+    let mut fold_evals_all: Vec<Vec<EF>> = Vec::with_capacity(verify_data.len());
     for vd in &verify_data {
+        let n_t = table_n_vars[&vd.table];
+        let b_t = k_skip.saturating_sub(n_max - n_t);
         let n_cols_total = vd.table.n_columns() + vd.table.n_shift_columns();
         let col_evals = verifier_state.next_extension_scalars_vec(n_cols_total)?;
 
@@ -151,25 +165,76 @@ pub fn verify_execution(
         }
         let constraint_eval = delegate_to_inner!(&vd.table => eval_constraint);
 
-        let bus_point = from_end(gkr_point, table_n_vars[&vd.table]);
-        let natural_ordering_point = natural_ordering_point_for_session(&sumcheck_air_point.0, table_n_vars[&vd.table]);
-        my_air_final_value += back_loaded_table_contribution(
-            bus_point,
-            &sumcheck_air_point.0,
-            &natural_ordering_point,
-            constraint_eval,
-        );
+        let bus_point = from_end(gkr_point, n_t);
+        let x_nat = natural_ordering_point_for_session(&c_post.0, n_t - b_t);
+        let eq_val = MultilinearPoint(bus_point[..n_t - b_t].to_vec()).eq_poly_outside(&MultilinearPoint(x_nat));
+        let kappa = if b_t > 0 {
+            // κ_t = A_t(r0) = Σ_j eq(β^blk)[j] · L^{(k)}[(2^k − 2^b) + rev_b(j)] (§1.1).
+            let eq_blk = eval_eq(&bus_point[n_t - b_t..]);
+            eq_blk
+                .iter()
+                .enumerate()
+                .map(|(j, &w)| w * skip.lagrange_on_d[(1 << k_skip) - (1 << b_t) + bit_reverse(j, b_t)])
+                .sum::<EF>()
+        } else {
+            // Late join: L^{(k)}[2^k − 1] · prefix-challenge product (§2.2).
+            skip.lagrange_on_d[(1 << k_skip) - 1]
+                * c_post.0[..(n_max - k_skip) - n_t].iter().copied().product::<EF>()
+        };
+        my_air_final_value += kappa * eq_val * constraint_eval;
 
-        macro_rules! split {
-            ($t:expr) => {{ columns_evals_flat_and_shift($t, &col_evals, &natural_ordering_point) }};
+        if b_t == 0 {
+            // Tensor claim already (§2.3): pushed directly, no conversion.
+            let natural_ordering_point = natural_ordering_point_for_session(&c_post.0, n_t);
+            macro_rules! split {
+                ($t:expr) => {{ columns_evals_flat_and_shift($t, &col_evals, &natural_ordering_point) }};
+            }
+            let claim = delegate_to_inner!(&vd.table => split);
+            committed_statements.get_mut(&vd.table).unwrap().push(claim);
         }
-        let claim = delegate_to_inner!(&vd.table => split);
-
-        committed_statements.get_mut(&vd.table).unwrap().push(claim);
+        fold_evals_all.push(col_evals);
     }
 
     if my_air_final_value != claimed_air_final_value {
         return Err(ProofError::InvalidProof);
+    }
+
+    // Terminal Lagrange→tensor conversions (§2.1 steps 5–7, §2.3).
+    let gamma: EF = verifier_state.sample();
+    for (vd, col_evals) in verify_data.iter().zip(&fold_evals_all) {
+        let n_t = table_n_vars[&vd.table];
+        let b_t = k_skip.saturating_sub(n_max - n_t);
+        if b_t == 0 {
+            continue;
+        }
+        let m_t = col_evals.len();
+        let gamma_pows: Vec<EF> = gamma.powers().collect_n(m_t);
+        let v_t: EF = col_evals.iter().zip(&gamma_pows).map(|(&e, &g)| e * g).sum();
+        let Evaluation {
+            point: s_t,
+            value: v_final,
+        } = sumcheck_verify(&mut verifier_state, b_t, 2, v_t, None)?;
+        let ghat = verifier_state.next_extension_scalars_vec(m_t)?;
+
+        // w_t(s_t) = Σ_j ℓ_{t,j} · eq_j(reverse(s_t)); ℓ via coherence subset-sums.
+        let sub = sub_block_lagrange_from_global(&skip.lagrange_on_d, b_t);
+        let s_rev: Vec<EF> = s_t.0.iter().rev().copied().collect();
+        let eq_s = eval_eq(&s_rev);
+        let w_s: EF = (0..1usize << b_t).map(|j| sub[bit_reverse(j, b_t)] * eq_s[j]).sum();
+        let ghat_gamma: EF = ghat.iter().zip(&gamma_pows).map(|(&g, &p)| g * p).sum();
+        if w_s * ghat_gamma != v_final {
+            return Err(ProofError::InvalidProof);
+        }
+
+        // §2.4 point splice: point_t = s_t ++ c_post (round order).
+        let mut point_t = s_t.0;
+        point_t.extend_from_slice(&c_post.0);
+        let natural_ordering_point = natural_ordering_point_for_session(&point_t, n_t);
+        macro_rules! split {
+            ($t:expr) => {{ columns_evals_flat_and_shift($t, &ghat, &natural_ordering_point) }};
+        }
+        let claim = delegate_to_inner!(&vd.table => split);
+        committed_statements.get_mut(&vd.table).unwrap().push(claim);
     }
 
     let public_memory_random_point = MultilinearPoint(verifier_state.sample_vec(log2_strict_usize(public_input.len())));
