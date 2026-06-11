@@ -148,7 +148,11 @@ pub fn verify_execution(
     } = sumcheck_verify(&mut verifier_state, n_max - k_skip, max_full_degree, skip.target, None)?;
 
     fn bit_reverse(x: usize, bits: usize) -> usize {
-        if bits == 0 { 0 } else { x.reverse_bits() >> (usize::BITS as usize - bits) }
+        if bits == 0 {
+            0
+        } else {
+            x.reverse_bits() >> (usize::BITS as usize - bits)
+        }
     }
 
     // AIR final check (§2.2): my_air_final_value = Σ_t κ_t·eq(β^x_t, x_nat_t)·C_t(fold_evals_t).
@@ -178,8 +182,7 @@ pub fn verify_execution(
                 .sum::<EF>()
         } else {
             // Late join: L^{(k)}[2^k − 1] · prefix-challenge product (§2.2).
-            skip.lagrange_on_d[(1 << k_skip) - 1]
-                * c_post.0[..(n_max - k_skip) - n_t].iter().copied().product::<EF>()
+            skip.lagrange_on_d[(1 << k_skip) - 1] * c_post.0[..(n_max - k_skip) - n_t].iter().copied().product::<EF>()
         };
         my_air_final_value += kappa * eq_val * constraint_eval;
 

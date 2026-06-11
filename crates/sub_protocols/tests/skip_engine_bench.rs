@@ -33,12 +33,17 @@ struct BenchTable {
 impl BenchTable {
     fn random(rng: &mut StdRng, log_n_rows: usize, n_flat: usize, n_shift: usize) -> Self {
         let n_rows = 1usize << log_n_rows;
-        let flat: Vec<ArenaVec<F>> =
-            (0..n_flat).map(|_| ArenaVec::from_iter((0..n_rows).map(|_| rng.random::<F>()))).collect();
+        let flat: Vec<ArenaVec<F>> = (0..n_flat)
+            .map(|_| ArenaVec::from_iter((0..n_rows).map(|_| rng.random::<F>())))
+            .collect();
         let refs: Vec<&[F]> = flat.iter().map(|c| c.as_slice()).collect();
         let shifted = compute_shifted_columns(n_shift, &refs);
         let eq_factor: Vec<EF> = (0..log_n_rows).map(|_| rng.random()).collect();
-        Self { flat, shifted, eq_factor }
+        Self {
+            flat,
+            shifted,
+            eq_factor,
+        }
     }
 
     fn columns(&self) -> Vec<&[F]> {
@@ -112,7 +117,9 @@ fn skip_engine_checkpoint() {
         non_padded_n_rows: 1 << POS_LOG_N,
     };
 
-    eprintln!("k | exec_engine_ms | both_engine_ms | poseidon_attrib_ms | gpass_exec_ms | gpass_pos_ms | total_ms | window_ms | saved_ms");
+    eprintln!(
+        "k | exec_engine_ms | both_engine_ms | poseidon_attrib_ms | gpass_exec_ms | gpass_pos_ms | total_ms | window_ms | saved_ms"
+    );
     for k in [4usize, 5] {
         // Warmup.
         let _ = time_engine(&[exec_input()], k, 1);

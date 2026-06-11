@@ -149,7 +149,10 @@ fn bit_reverse(x: usize, bits: usize) -> usize {
 /// `n_cosets` disjoint cosets `g_c·D_b`, `g_c = ω_{b+4}^c` (disjoint for
 /// `c ∈ 1..16`; asserted).
 fn coset_gens<F: TwoAdicField>(b: usize, n_cosets: usize) -> Vec<F> {
-    assert!(n_cosets < 16, "coset budget exceeded (degree too high for the point-set construction)");
+    assert!(
+        n_cosets < 16,
+        "coset budget exceeded (degree too high for the point-set construction)"
+    );
     let g = F::two_adic_generator(b + 4);
     let mut out = Vec::with_capacity(n_cosets);
     let mut cur = F::ONE;
@@ -289,7 +292,8 @@ where
                     let eq = eq_packed[xp0 + u];
                     for node in 0..n_nodes {
                         st.point.clear();
-                        st.point.extend((0..m_cols).map(|c| st.coset_out[c * n_nodes + node][u]));
+                        st.point
+                            .extend((0..m_cols).map(|c| st.coset_out[c * n_nodes + node][u]));
                         acc[(ci + 1) * n_nodes + node] += comp.eval_packed_base(&st.point) * eq;
                     }
                 }
@@ -385,11 +389,7 @@ where
 }
 
 /// Lagrange block-fold (plan §3.5): `folded_c(x) = Σ_j ℓ_j · col_c[x·2^b + j]`.
-fn lagrange_fold_columns<EF: ExtensionField<PF<EF>>>(
-    columns: &[&[PF<EF>]],
-    ell: &[EF],
-    b: usize,
-) -> MleGroupOwned<EF> {
+fn lagrange_fold_columns<EF: ExtensionField<PF<EF>>>(columns: &[&[PF<EF>]], ell: &[EF], b: usize) -> MleGroupOwned<EF> {
     let n_x = columns[0].len() >> b;
     let folded: Vec<Vec<EF>> = columns
         .iter()
@@ -511,8 +511,8 @@ where
             let q_values = compute_qprime_values(input, b, &gens);
             let points = point_set::<PF<EF>>(b, &gens);
             let pairs: Vec<(PF<EF>, EF)> = points.into_iter().zip(q_values).collect();
-            let q_poly = DensePolynomial::lagrange_interpolation(&pairs)
-                .expect("distinct interpolation points by construction");
+            let q_poly =
+                DensePolynomial::lagrange_interpolation(&pairs).expect("distinct interpolation points by construction");
             let mut q_coeffs = q_poly.coeffs;
             // Interpolation over the full point set returns one coefficient
             // per point; everything above the true degree must vanish.

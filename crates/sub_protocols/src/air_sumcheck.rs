@@ -595,8 +595,7 @@ pub fn prove_batched_air_sumcheck_with_factors<'a, EF: ExtensionField<PF<EF>>>(
             if round < join_round {
                 k[idx] *= challenge;
             } else if let Some(bare_poly) = &bare_polys[idx] {
-                info_span!("air_fold", session = idx)
-                    .in_scope(|| session.process_challenge(challenge, bare_poly));
+                info_span!("air_fold", session = idx).in_scope(|| session.process_challenge(challenge, bare_poly));
             }
         }
     }

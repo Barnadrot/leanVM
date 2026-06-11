@@ -119,7 +119,13 @@ fn expected_delta_f(heights: &[(Table, usize)]) -> usize {
     (delta_ef as usize) * 3 // EF -> F (DIMENSION = 3)
 }
 
-fn prove_program(program: &str) -> (Bytecode, [F; PUBLIC_INPUT_LEN], lean_prover::prove_execution::ExecutionProof) {
+fn prove_program(
+    program: &str,
+) -> (
+    Bytecode,
+    [F; PUBLIC_INPUT_LEN],
+    lean_prover::prove_execution::ExecutionProof,
+) {
     let bytecode = compile_program_with_flags(&ProgramSource::Raw(program.to_string()), CompilationFlags::default());
     let public_input = [F::ZERO; PUBLIC_INPUT_LEN];
     let proof = prove_execution(
@@ -147,7 +153,10 @@ fn roundtrip_and_size(program: &str, baseline: usize, expect_b_profile: &[(&str,
     for &(name, expected_b) in expect_b_profile {
         let &(_, n_t) = heights.iter().find(|(t, _)| t.name() == name).unwrap();
         let b_t = AIR_UNIVARIATE_SKIP.saturating_sub(n_max - n_t);
-        assert_eq!(b_t, expected_b, "b profile changed for table {name} (heights {heights:?})");
+        assert_eq!(
+            b_t, expected_b,
+            "b profile changed for table {name} (heights {heights:?})"
+        );
     }
 
     // Proof-size delta vs the pre-switch baseline (closed form ± Merkle jitter).
@@ -166,7 +175,11 @@ fn roundtrip_and_size(program: &str, baseline: usize, expect_b_profile: &[(&str,
 
 #[test]
 fn skip_e2e_fib_b_profile_k_0_0() {
-    roundtrip_and_size(FIB_PROGRAM, BASELINE_FIB, &[("execution", 5), ("poseidon8", 0), ("extension_op", 0)]);
+    roundtrip_and_size(
+        FIB_PROGRAM,
+        BASELINE_FIB,
+        &[("execution", 5), ("poseidon8", 0), ("extension_op", 0)],
+    );
 }
 
 #[test]

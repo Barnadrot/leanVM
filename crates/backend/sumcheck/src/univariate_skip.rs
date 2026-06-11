@@ -495,7 +495,13 @@ mod tests {
         // Interleave into evals on the size-2^{k+1} subgroup: ω_{k+1}^{2j} = ω_k^j,
         // ω_{k+1}^{2j+1} = g·ω_k^j. deg v0 ≤ 2(2^k−1) < 2^{k+1} ✓.
         let mut v0_slices: Vec<Vec<EF>> = (0..2 * m)
-            .map(|idx| vec![if idx % 2 == 0 { v0_on_d[idx / 2] } else { v0_on_gd[idx / 2] }])
+            .map(|idx| {
+                vec![if idx % 2 == 0 {
+                    v0_on_d[idx / 2]
+                } else {
+                    v0_on_gd[idx / 2]
+                }]
+            })
             .collect();
         block_ifft_arrays::<F, EF>(&mut v0_slices, k + 1);
         let v0_coeffs: Vec<EF> = v0_slices.iter().map(|s| s[0]).collect();

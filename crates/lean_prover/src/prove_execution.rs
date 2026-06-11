@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::*;
-use backend::{ArenaVec, prove_weighted_block_sumcheck};
 use backend::ansi::Colorize;
+use backend::{ArenaVec, prove_weighted_block_sumcheck};
 use lean_vm::*;
 use serde::{Deserialize, Serialize};
 use sub_protocols::*;
@@ -359,8 +359,7 @@ pub fn prove_execution(
                     *slot += gj * gp;
                 }
             }
-            let (s_t, _w_g_final) =
-                prove_weighted_block_sumcheck(&mut prover_state, out.ell.clone(), g_gamma);
+            let (s_t, _w_g_final) = prove_weighted_block_sumcheck(&mut prover_state, out.ell.clone(), g_gamma);
             // ĝ_c = G_c folded LSB-first by s_t = col_c-MLE(x_nat ++ reverse(s_t)).
             let ghat: Vec<EF> = g_cols
                 .iter()

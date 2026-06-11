@@ -410,7 +410,11 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
             .map(|b| {
                 let revs: Vec<String> = (0..1usize << b)
                     .map(|j: usize| {
-                        let r = if b == 0 { 0 } else { j.reverse_bits() >> (usize::BITS as usize - b) };
+                        let r = if b == 0 {
+                            0
+                        } else {
+                            j.reverse_bits() >> (usize::BITS as usize - b)
+                        };
                         r.to_string()
                     })
                     .collect();

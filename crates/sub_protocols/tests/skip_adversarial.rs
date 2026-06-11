@@ -33,16 +33,20 @@ fn n_uni() -> usize {
 }
 
 fn bit_reverse(x: usize, bits: usize) -> usize {
-    if bits == 0 { 0 } else { x.reverse_bits() >> (usize::BITS as usize - bits) }
+    if bits == 0 {
+        0
+    } else {
+        x.reverse_bits() >> (usize::BITS as usize - bits)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tamper {
     None,
-    V0CosetSlot,    // index 2^K (multiple of 2^K, != 0)
-    V0FreeSlot,     // index 1 (not a multiple of 2^K)
-    ConversionMsg,  // wrong weight vector inside the conversion sumcheck
-    GhatEntry,      // ĝ[0] += 1
+    V0CosetSlot,   // index 2^K (multiple of 2^K, != 0)
+    V0FreeSlot,    // index 1 (not a multiple of 2^K)
+    ConversionMsg, // wrong weight vector inside the conversion sumcheck
+    GhatEntry,     // ĝ[0] += 1
 }
 
 /// Runs the full §2 wire protocol (prover + verifier) on one random
@@ -123,12 +127,9 @@ fn run_protocol(tamper: Tamper) -> Result<(), ProofError> {
     let folded: Vec<ArenaVec<EF>> = columns
         .iter()
         .map(|col| {
-            ArenaVec::from_iter((0..n_x).map(|x| {
-                ell.iter()
-                    .enumerate()
-                    .map(|(j, &l)| l * col[(x << b) | j])
-                    .sum::<EF>()
-            }))
+            ArenaVec::from_iter(
+                (0..n_x).map(|x| ell.iter().enumerate().map(|(j, &l)| l * col[(x << b) | j]).sum::<EF>()),
+            )
         })
         .collect();
 
@@ -182,7 +183,10 @@ fn run_protocol(tamper: Tamper) -> Result<(), ProofError> {
     };
     let (s_chals, _) = prove_weighted_block_sumcheck(&mut ps, weights_used, g_gamma);
     let s_rev: Vec<EF> = s_chals.iter().rev().copied().collect();
-    let mut ghat: Vec<EF> = g.iter().map(|g_c| g_c.evaluate(&MultilinearPoint(s_rev.clone()))).collect();
+    let mut ghat: Vec<EF> = g
+        .iter()
+        .map(|g_c| g_c.evaluate(&MultilinearPoint(s_rev.clone())))
+        .collect();
     if tamper == Tamper::GhatEntry {
         ghat[0] += EF::ONE;
     }

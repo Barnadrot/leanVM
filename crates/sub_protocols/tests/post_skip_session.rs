@@ -215,11 +215,8 @@ fn post_skip_session_proves_folded_claim() {
 
     let col_evals_v: Vec<EF> = vs.next_extension_scalars_vec(n_cols).unwrap();
     assert_eq!(col_evals_v, col_evals);
-    let constraint_eval = <Poseidon8Precompile<false> as SumcheckComputation<EF>>::eval_extension(
-        &air,
-        &col_evals_v,
-        &extra_data_v,
-    );
+    let constraint_eval =
+        <Poseidon8Precompile<false> as SumcheckComputation<EF>>::eval_extension(&air, &col_evals_v, &extra_data_v);
     let natural_point = natural_ordering_point_for_session(&point.0, n);
     let eq_val = MultilinearPoint(eq_factor_v).eq_poly_outside(&MultilinearPoint(natural_point.clone()));
     assert_eq!(value, kappa_v * eq_val * constraint_eval);

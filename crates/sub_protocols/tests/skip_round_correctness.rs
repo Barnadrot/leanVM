@@ -29,7 +29,11 @@ fn n_uni_coeffs(k: usize) -> usize {
 }
 
 fn bit_reverse(x: usize, bits: usize) -> usize {
-    if bits == 0 { 0 } else { x.reverse_bits() >> (usize::BITS as usize - bits) }
+    if bits == 0 {
+        0
+    } else {
+        x.reverse_bits() >> (usize::BITS as usize - bits)
+    }
 }
 
 /// Random table data: `n_flat` random columns of length `2^log_n_rows`, rows
@@ -131,9 +135,27 @@ fn skip_engine_identities() {
         let pos_extra = ExtraDataForBuses::new(&[], alpha.powers().collect_n(pos_air.n_constraints()));
         let ext_extra = ExtraDataForBuses::new(&[], alpha.powers().collect_n(ext_air.n_constraints()));
 
-        let t0 = TestTable::random(&mut rng, n_max, pos_air.n_columns(), pos_air.n_shift_columns(), (1 << n_max) - 5);
-        let t1 = TestTable::random(&mut rng, n_max - 1, ext_air.n_columns(), ext_air.n_shift_columns(), (1 << (n_max - 1)) - 3);
-        let t2 = TestTable::random(&mut rng, n_max - 4, ext_air.n_columns(), ext_air.n_shift_columns(), 1 << (n_max - 4));
+        let t0 = TestTable::random(
+            &mut rng,
+            n_max,
+            pos_air.n_columns(),
+            pos_air.n_shift_columns(),
+            (1 << n_max) - 5,
+        );
+        let t1 = TestTable::random(
+            &mut rng,
+            n_max - 1,
+            ext_air.n_columns(),
+            ext_air.n_shift_columns(),
+            (1 << (n_max - 1)) - 3,
+        );
+        let t2 = TestTable::random(
+            &mut rng,
+            n_max - 4,
+            ext_air.n_columns(),
+            ext_air.n_shift_columns(),
+            1 << (n_max - 4),
+        );
 
         let sums = [
             brute_sum(&t0, &pos_air, &pos_extra),
@@ -143,7 +165,11 @@ fn skip_engine_identities() {
 
         let skip_pos = SkipAir::<EF, _>::new(&pos_air, &pos_extra);
         let skip_ext = SkipAir::<EF, _>::new(&ext_air, &ext_extra);
-        let tables = [(&t0, &skip_pos as &dyn sub_protocols::SkipComputation<EF>), (&t1, &skip_ext), (&t2, &skip_ext)];
+        let tables = [
+            (&t0, &skip_pos as &dyn sub_protocols::SkipComputation<EF>),
+            (&t1, &skip_ext),
+            (&t2, &skip_ext),
+        ];
         let inputs: Vec<SkipTableInput<'_, EF>> = tables
             .iter()
             .zip(&sums)
@@ -160,7 +186,11 @@ fn skip_engine_identities() {
         let out = prove_air_univariate_skip(&mut ps, &inputs, k, n_uni_coeffs(k));
 
         // (a) coset-sum identity against the brute-force sums.
-        assert_eq!(coset_sum(&out.v0_coeffs, k), sums.iter().copied().sum::<EF>(), "k={k}: coset sum");
+        assert_eq!(
+            coset_sum(&out.v0_coeffs, k),
+            sums.iter().copied().sum::<EF>(),
+            "k={k}: coset sum"
+        );
 
         // Per-table independent recomputation of κ, ℓ, sum_post.
         let r0 = out.r0;
@@ -172,7 +202,11 @@ fn skip_engine_identities() {
             assert_eq!(table_out.b, b, "k={k} t={idx}");
 
             if b == 0 {
-                assert_eq!(table_out.kappa, out.lagrange_global[(1 << k) - 1], "k={k} t={idx}: κ (b=0)");
+                assert_eq!(
+                    table_out.kappa,
+                    out.lagrange_global[(1 << k) - 1],
+                    "k={k} t={idx}: κ (b=0)"
+                );
                 assert_eq!(table_out.sum_post, sums[idx], "k={k} t={idx}: sum_post (b=0)");
                 rhs += table_out.kappa * table_out.sum_post;
                 continue;
@@ -223,9 +257,13 @@ fn skip_engine_identities() {
                 // trait has no extension eval, so recompute via the concrete
                 // airs below instead.
                 let c_eval = if idx == 0 {
-                    <Poseidon8Precompile<false> as SumcheckComputation<EF>>::eval_extension(&pos_air, &point, &pos_extra)
+                    <Poseidon8Precompile<false> as SumcheckComputation<EF>>::eval_extension(
+                        &pos_air, &point, &pos_extra,
+                    )
                 } else {
-                    <ExtensionOpPrecompile<false> as SumcheckComputation<EF>>::eval_extension(&ext_air, &point, &ext_extra)
+                    <ExtensionOpPrecompile<false> as SumcheckComputation<EF>>::eval_extension(
+                        &ext_air, &point, &ext_extra,
+                    )
                 };
                 let _ = comp; // silence unused in this branch
                 q_at_rho += w * c_eval;
@@ -293,8 +331,20 @@ fn end_to_end_mini_protocol() {
     let ext_extra = ExtraDataForBuses::new(&[], alpha.powers().collect_n(ext_air.n_constraints()));
 
     // b = 4 (poseidon, n = 10), b = 3 (ext_op, n = 9), b = 0 (ext_op, n = 5).
-    let t0 = TestTable::random(&mut rng, n_max, pos_air.n_columns(), pos_air.n_shift_columns(), (1 << n_max) - 9);
-    let t1 = TestTable::random(&mut rng, 9, ext_air.n_columns(), ext_air.n_shift_columns(), (1 << 9) - 2);
+    let t0 = TestTable::random(
+        &mut rng,
+        n_max,
+        pos_air.n_columns(),
+        pos_air.n_shift_columns(),
+        (1 << n_max) - 9,
+    );
+    let t1 = TestTable::random(
+        &mut rng,
+        9,
+        ext_air.n_columns(),
+        ext_air.n_shift_columns(),
+        (1 << 9) - 2,
+    );
     let t2 = TestTable::random(&mut rng, 5, ext_air.n_columns(), ext_air.n_shift_columns(), 1 << 5);
     let sums = [
         brute_sum(&t0, &pos_air, &pos_extra),
@@ -394,7 +444,10 @@ fn end_to_end_mini_protocol() {
         let (s_chals, _final_val) = prove_weighted_block_sumcheck(&mut ps, tout.ell.clone(), g_gamma);
         // ĝ_c = G_c-MLE at the reversed challenges.
         let s_rev: Vec<EF> = s_chals.iter().rev().copied().collect();
-        let ghat: Vec<EF> = g.iter().map(|g_c| g_c.evaluate(&MultilinearPoint(s_rev.clone()))).collect();
+        let ghat: Vec<EF> = g
+            .iter()
+            .map(|g_c| g_c.evaluate(&MultilinearPoint(s_rev.clone())))
+            .collect();
         ps.add_extension_scalars(&ghat);
         ghats.push(ghat);
     }
@@ -412,7 +465,10 @@ fn end_to_end_mini_protocol() {
 
     // Step 3: post-skip rounds (existing verifier).
     let max_full_degree = MAX_AIR_DEGREE + 1;
-    let Evaluation { point: c_post_v, value: t_final } = sumcheck_verify(&mut vs, n_max - k, max_full_degree, target, None).unwrap();
+    let Evaluation {
+        point: c_post_v,
+        value: t_final,
+    } = sumcheck_verify(&mut vs, n_max - k, max_full_degree, target, None).unwrap();
     assert_eq!(c_post_v.0, c_post.0);
 
     // Step 4: fold_evals + final AIR check (§2.2).
@@ -451,7 +507,15 @@ fn end_to_end_mini_protocol() {
             let join = (n_max - k) - n;
             lagrange[(1 << k) - 1] * c_post_v.0[..join].iter().copied().product::<EF>()
         };
-        assert_eq!(kappa, initial_k[idx] * if b > 0 { EF::ONE } else { c_post_v.0[..(n_max - k) - n].iter().copied().product::<EF>() });
+        assert_eq!(
+            kappa,
+            initial_k[idx]
+                * if b > 0 {
+                    EF::ONE
+                } else {
+                    c_post_v.0[..(n_max - k) - n].iter().copied().product::<EF>()
+                }
+        );
         my_final += kappa * eq_val * c_eval;
         fold_evals_v.push(evals);
     }
@@ -472,7 +536,10 @@ fn end_to_end_mini_protocol() {
             .enumerate()
             .map(|(c, &e)| gamma_v.exp_u64(c as u64) * e)
             .sum();
-        let Evaluation { point: s_t, value: v_final } = sumcheck_verify(&mut vs, b, 2, v_t, None).unwrap();
+        let Evaluation {
+            point: s_t,
+            value: v_final,
+        } = sumcheck_verify(&mut vs, b, 2, v_t, None).unwrap();
         let ghat: Vec<EF> = vs.next_extension_scalars_vec(m_cols).unwrap();
         assert_eq!(ghat, ghats[idx]);
 
@@ -482,7 +549,11 @@ fn end_to_end_mini_protocol() {
         assert_eq!(ell, tout.ell);
         let s_rev: Vec<EF> = s_t.0.iter().rev().copied().collect();
         let w_at_s = ell.evaluate(&MultilinearPoint(s_rev.clone()));
-        let ghat_gamma: EF = ghat.iter().enumerate().map(|(c, &g)| gamma_v.exp_u64(c as u64) * g).sum();
+        let ghat_gamma: EF = ghat
+            .iter()
+            .enumerate()
+            .map(|(c, &g)| gamma_v.exp_u64(c as u64) * g)
+            .sum();
         assert_eq!(w_at_s * ghat_gamma, v_final, "conversion terminal check");
 
         // The ĝ are tensor-point claims on the ORIGINAL columns at the spliced
@@ -491,7 +562,11 @@ fn end_to_end_mini_protocol() {
         let mut natural_point = x_nat.clone();
         natural_point.extend(s_rev.iter().copied());
         for (c, col) in t.columns().iter().enumerate().take(3) {
-            assert_eq!(ghat[c], col.evaluate(&MultilinearPoint(natural_point.clone())), "t={idx} c={c}: ĝ vs col-MLE");
+            assert_eq!(
+                ghat[c],
+                col.evaluate(&MultilinearPoint(natural_point.clone())),
+                "t={idx} c={c}: ĝ vs col-MLE"
+            );
         }
     }
 }
