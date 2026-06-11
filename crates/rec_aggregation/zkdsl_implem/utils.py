@@ -261,6 +261,25 @@ def maximum(a, b):
 
 
 @inline
+def minimum(a, b):
+    is_a_less_than_b = checked_less_than(a, b)
+    res: Imm
+    if is_a_less_than_b == 1:
+        res = a
+    else:
+        res = b
+    return res
+
+
+def copy_many_ef_dynamic(a, b, n):
+    # Copy `n` (runtime, n < 24) extension-field elements from a to b.
+    # Bounded instantiation: n is a point length (< MAX log table height).
+    debug_assert(n < 24)
+    match_range(n, range(0, 24), lambda i: copy_many_ef(a, b, i))
+    return
+
+
+@inline
 def two_exp(n):
     debug_assert(n < 33)
     res = match_range(n, range(0, 33), lambda i: 2**i)
