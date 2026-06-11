@@ -29,18 +29,6 @@ MAX_NUM_COLS_AIR = MAX_NUM_COLS_AIR_PLACEHOLDER  # max(NUM_COLS_AIR[t] for t in 
 ONE_BUSES_ALL_COLS = ONE_BUSES_ALL_COLS_PLACEHOLDER  # [[col, ...], _; N_TABLES] — sorted union of cols across all Multiplicity::One buses per table
 
 MAX_AIR_FULL_DEGREE = MAX_AIR_FULL_DEGREE_PLACEHOLDER
-
-# Univariate skip (plan_spec v2 sec 2.1; mirrors sub_protocols AIR_UNIVARIATE_SKIP
-# and backend/sumcheck verify_univariate_skip_round on the Rust side).
-# Constant tables are computed in compilation.rs (the zkdsl grammar has no hex /
-# pow / comprehensions): omega powers (node m of D is omega^m, the same convention
-# as univariate_skip.rs lagrange_evals_on_subgroup), the Lagrange numerator
-# constants omega^m / 2^k, and bit-reversal tables AIR_SKIP_BIT_REV[b][j] = rev_b(j).
-AIR_SKIP_K = AIR_SKIP_K_PLACEHOLDER
-AIR_SKIP_N_UNI_COEFFS = AIR_SKIP_N_UNI_COEFFS_PLACEHOLDER  # = MAX_AIR_FULL_DEGREE * (2^k - 1) + 1
-AIR_SKIP_OMEGA_POWERS = AIR_SKIP_OMEGA_POWERS_PLACEHOLDER
-AIR_SKIP_LAGRANGE_NUM = AIR_SKIP_LAGRANGE_NUM_PLACEHOLDER
-AIR_SKIP_BIT_REV = AIR_SKIP_BIT_REV_PLACEHOLDER
 N_AIR_COLUMNS = N_AIR_COLUMNS_PLACEHOLDER  # [_; N_TABLES]
 N_AIR_SHIFT_COLUMNS = N_AIR_SHIFT_COLUMNS_PLACEHOLDER  # [_; N_TABLES] — by convention, shift column j of table t is column j
 AIR_ALPHA_OFFSETS = AIR_ALPHA_OFFSETS_PLACEHOLDER  # [_; N_TABLES], # AIR_ALPHA_OFFSETS[t] = sum(N_AIR_CONSTRAINTS[k] for k in range(t))
@@ -334,43 +322,9 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         initial_sum = add_extension_ret(initial_sum, bus_final_value)
 
     n_max = log_max_table_height
-    n_post = n_max - AIR_SKIP_K
+    # Batched AIR sumcheck:
+    fs, all_challenges, batched_air_final_value = sumcheck_verify_reversed(fs, n_max, initial_sum, MAX_AIR_FULL_DEGREE)
 
-    # ---- Univariate skip round (plan_spec v2 sec 2.1 rows 1-2; mirrors
-    # backend/sumcheck verify_univariate_skip_round) ----
-    # Row 1: v0 coefficients; coset-sum identity 2^k * sum_j c_{j*2^k} == initial_sum.
-    fs, v0_coeffs = fs_receive_ef_inlined(fs, AIR_SKIP_N_UNI_COEFFS)
-    air_coset_sum: Mut = v0_coeffs
-    for j in unroll(1, div_ceil(AIR_SKIP_N_UNI_COEFFS, 2**AIR_SKIP_K)):
-        air_coset_sum = add_extension_ret(air_coset_sum, v0_coeffs + j * 2**AIR_SKIP_K * DIM)
-    air_coset_sum = mul_base_extension_ret(2**AIR_SKIP_K, air_coset_sum)
-    copy_ef(air_coset_sum, initial_sum)  # write-once equality: sum over D of v0 == initial_sum
-
-    # Row 2: sample r0; target = v0(r0); Lagrange table L_m(r0) on D.
-    fs, air_r0 = fs_sample_ef(fs)
-    air_skip_target = univariate_polynomial_eval(v0_coeffs, air_r0, AIR_SKIP_N_UNI_COEFFS - 1)
-    r0_pow: Mut = air_r0
-    for sq in unroll(0, AIR_SKIP_K):
-        r0_pow = mul_extension_ret(r0_pow, r0_pow)
-    zh = sub_extension_base_ret(r0_pow, 1)  # zh = r0^(2^k) - 1
-    # Reject r0 in D exactly like the Rust verifier: zh * zh_inv == 1 forces zh != 0.
-    zh_inv = Array(DIM)
-    div_extension(ONE_EF_PTR, zh, zh_inv)
-    # L_m(r0) = zh * (omega^m / 2^k) / (r0 - omega^m), node m <-> omega^m.
-    lagrange_on_d = Array(2**AIR_SKIP_K * DIM)
-    for m in unroll(0, 2**AIR_SKIP_K):
-        num_m = mul_base_extension_ret(AIR_SKIP_LAGRANGE_NUM[m], zh)
-        den_m = sub_extension_base_ret(air_r0, AIR_SKIP_OMEGA_POWERS[m])
-        div_extension(num_m, den_m, lagrange_on_d + m * DIM)
-
-    # Row 3: remaining n_max - k rounds (unchanged degree-10 message format).
-    fs, c_post, batched_air_final_value = sumcheck_verify_reversed(
-        fs, n_post, air_skip_target, MAX_AIR_FULL_DEGREE
-    )
-
-    # Row 4: per-table fold_evals + AIR final check (sec 2.2):
-    # my_air_final_value = sum_t kappa_t * eq(beta_x_t, x_nat_t) * C_t(fold_evals_t).
-    fold_evals_ptrs = Array(N_TABLES)
     check_sum: Mut = ZERO_VEC_PTR
     for table_index in unroll(0, N_TABLES):
         log_n_rows = table_log_heights[table_index]
@@ -379,70 +333,29 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
         alpha_offset = AIR_ALPHA_OFFSETS[table_index]
 
         fs, inner_evals = fs_receive_ef_inlined(fs, n_flat_columns + n_shift_columns)
-        fold_evals_ptrs[table_index] = inner_evals
 
         air_constraints_eval = evaluate_air_constraints(
             table_index, inner_evals, air_alpha_powers + alpha_offset * DIM, logup_beta_eq_poly
         )
 
         bus_point = pcs_inner_points[table_index]
-        # b_t = max(0, k - d_t) with d_t = n_max - log_n_rows; dispatch on d_t.
-        d_t = n_max - log_n_rows
-        eq_val, kappa = match_range(
-            d_t,
-            range(0, AIR_SKIP_K),
-            lambda dd: air_skip_eq_and_kappa_blk(AIR_SKIP_K - dd, bus_point, log_n_rows, c_post, lagrange_on_d),
-            range(AIR_SKIP_K, 32),
-            lambda dd: air_skip_eq_and_kappa_late(bus_point, log_n_rows, c_post, n_post, lagrange_on_d),
-        )
-        contribution = mul_extension_ret(kappa, mul_extension_ret(eq_val, air_constraints_eval))
+        eq_val = poly_eq_extension_dynamic_ret(bus_point, all_challenges, log_n_rows)
+
+        k_t = product_first_n(all_challenges + log_n_rows * DIM, n_max - log_n_rows)
+
+        contribution = mul_extension_ret(k_t, mul_extension_ret(eq_val, air_constraints_eval))
         check_sum = add_extension_ret(check_sum, contribution)
+
+        # AIR block (i=1): all flat cols 0..n_flat_columns populated; shifts 0..n_shift_columns populated.
+        for i in unroll(0, n_flat_columns):
+            pcs_vals_air[table_index * MAX_NUM_COLS_AIR + i] = inner_evals + i * DIM
+        if n_shift_columns != 0:
+            evals_shift = inner_evals + n_flat_columns * DIM
+            for i in unroll(0, n_shift_columns):
+                pcs_shifts_air[table_index * MAX_NUM_COLS_AIR + i] = evals_shift + i * DIM
 
     # verify that the AIR-batched sumcheck is valid
     copy_ef(check_sum, batched_air_final_value)
-
-    # Rows 5-7: gamma, then per b_t>0 table (ALL_TABLES order) the terminal
-    # Lagrange-to-tensor conversion sumcheck + g_hat_t (sec 2.3); per-table natural
-    # points [x_nat ++ reverse(s_t)] feed the WHIR claims (sec 2.4).
-    fs, conv_gamma = fs_sample_ef(fs)
-    air_natural_points = Array(N_TABLES)
-    for table_index in unroll(0, N_TABLES):
-        log_n_rows = table_log_heights[table_index]
-        n_flat_columns = N_AIR_COLUMNS[table_index]
-        n_shift_columns = N_AIR_SHIFT_COLUMNS[table_index]
-        d_t = n_max - log_n_rows
-
-        gamma_powers = powers_const(conv_gamma, n_flat_columns + n_shift_columns)
-        fold_evals_t = fold_evals_ptrs[table_index]
-        v_t = dot_product_ee_ret(fold_evals_t, gamma_powers, n_flat_columns + n_shift_columns)
-
-        fs, s_arr, air_evals = match_range(
-            d_t,
-            range(0, AIR_SKIP_K),
-            lambda dd: air_skip_conversion(
-                AIR_SKIP_K - dd, n_flat_columns + n_shift_columns, fs, v_t, gamma_powers, lagrange_on_d
-            ),
-            range(AIR_SKIP_K, 32),
-            lambda dd: air_skip_no_conversion(fs, fold_evals_t),
-        )
-
-        # sec 2.4 natural point: first len_x coords = c_post natural prefix, then the
-        # reversed-storage conversion challenges (b_t = log_n_rows - len_x; 0 if no
-        # conversion, making pt the plain c_post prefix).
-        len_x = minimum(log_n_rows, n_post)
-        b_t = log_n_rows - len_x
-        pt = Array(log_n_rows * DIM)
-        copy_many_ef_dynamic(c_post, pt, len_x)
-        copy_many_ef_dynamic(s_arr, pt + len_x * DIM, b_t)
-        air_natural_points[table_index] = pt
-
-        # PCS values: g_hat_t for converted tables, fold_evals for b_t = 0 tables.
-        for i in unroll(0, n_flat_columns):
-            pcs_vals_air[table_index * MAX_NUM_COLS_AIR + i] = air_evals + i * DIM
-        if n_shift_columns != 0:
-            evals_shift = air_evals + n_flat_columns * DIM
-            for i in unroll(0, n_shift_columns):
-                pcs_shifts_air[table_index * MAX_NUM_COLS_AIR + i] = evals_shift + i * DIM
 
     fs, public_memory_random_point = fs_sample_many_ef(fs, INNER_PUBLIC_MEMORY_LOG_SIZE)
     poly_eq_public_mem = compute_eq_mle_extension(public_memory_random_point, INNER_PUBLIC_MEMORY_LOG_SIZE)
@@ -612,13 +525,13 @@ def recursion(inner_public_memory, initial_fiat_shamir_cap):
             curr_randomness += DIM
         eval_weights = add_extension_ret(eval_weights, mul_extension_ret(logup_acc, eq_factor_logup))
 
-        # AIR - per-table natural point [x_nat ++ reverse(s_t)] (plan_spec v2 sec 2.4)
+        # AIR
         if n_shift_columns != 0:
-            next_factor = next_mle(air_natural_points[table_index], inner_folding, log_n_rows)
+            next_factor = next_mle(all_challenges, inner_folding, log_n_rows)
             shift_sum = dot_product_ee_ret(curr_randomness, column_prefixes, n_shift_columns)
             eval_weights = add_extension_ret(eval_weights, mul_extension_ret(shift_sum, next_factor))
             curr_randomness += n_shift_columns * DIM
-        eq_factor_air = poly_eq_extension_dynamic_ret(air_natural_points[table_index], inner_folding, log_n_rows)
+        eq_factor_air = poly_eq_extension_dynamic_ret(all_challenges, inner_folding, log_n_rows)
         air_sum = dot_product_ee_ret(curr_randomness, column_prefixes, N_AIR_COLUMNS[table_index])
         eval_weights = add_extension_ret(eval_weights, mul_extension_ret(air_sum, eq_factor_air))
         curr_randomness += N_AIR_COLUMNS[table_index] * DIM
@@ -632,81 +545,6 @@ def multilinear_location_prefix(offset, n_vars, point):
     bits = checked_decompose_bits_small_value(offset, n_vars)
     res = poly_eq_base_extension(bits, point, n_vars)
     return res
-
-
-def air_skip_eq_and_kappa_blk(b: Const, bus_point, log_n_rows, c_post, lagrange_on_d):
-    # sec 2.2, b_t = b > 0: eq over the TRUNCATED bus point beta_x_t (first
-    # log_n_rows - b coords vs the c_post natural prefix) and kappa_t = A_t(r0) =
-    # sum_j eq(beta_blk_t)[j] * L[(2^k - 2^b) + rev_b(j)] (verify_execution.rs:171-178).
-    eq_val = poly_eq_extension_dynamic_ret(bus_point, c_post, log_n_rows - b)
-    eq_blk = compute_eq_mle_extension(bus_point + (log_n_rows - b) * DIM, b)
-    kappa: Mut = ZERO_VEC_PTR
-    for j in unroll(0, 2**b):
-        kappa = add_extension_ret(
-            kappa,
-            mul_extension_ret(
-                eq_blk + j * DIM,
-                lagrange_on_d + (2**AIR_SKIP_K - 2**b + AIR_SKIP_BIT_REV[b][j]) * DIM,
-            ),
-        )
-    return eq_val, kappa
-
-
-def air_skip_eq_and_kappa_late(bus_point, log_n_rows, c_post, n_post, lagrange_on_d):
-    # sec 2.2, b_t = 0 (late join): eq over the full bus point; kappa_t =
-    # L[2^k - 1] * prefix-challenge product (the first (n_post - log_n_rows) rounds,
-    # which live at reversed-storage slots log_n_rows.. - same pattern as the old k_t).
-    eq_val = poly_eq_extension_dynamic_ret(bus_point, c_post, log_n_rows)
-    kappa = mul_extension_ret(
-        lagrange_on_d + (2**AIR_SKIP_K - 1) * DIM,
-        product_first_n(c_post + log_n_rows * DIM, n_post - log_n_rows),
-    )
-    return eq_val, kappa
-
-
-def air_skip_conversion_rounds(prev_fs, n_steps: Const, prev_claimed_sum, challenges):
-    # Degree-2 clone of whir sumcheck_verify_reversed_helper_const (sec 2.1 row 6),
-    # bounded to n_steps <= AIR_SKIP_K (plan_spec v2 sec 5.6 - do not reuse the
-    # 0..32-range helper). Challenges stored reversed (round r -> slot n_steps-1-r).
-    fs: Mut = prev_fs
-    claimed_sum: Mut = prev_claimed_sum
-    for sc_round in unroll(0, n_steps):
-        fs, poly = fs_receive_ef_inlined(fs, 3)
-        polynomial_sum_at_0_and_1(poly, 2, claimed_sum)
-        fs, rand = fs_sample_ef(fs)
-        claimed_sum = univariate_polynomial_eval(poly, rand, 2)
-        copy_ef(rand, challenges + (n_steps - 1 - sc_round) * DIM)
-    return fs, claimed_sum
-
-
-def air_skip_no_conversion(fs, fold_evals_t):
-    # b_t = 0 branch of the conversion dispatch: no FS messages, natural point is
-    # the plain c_post prefix and the PCS values stay the fold_evals.
-    return fs, ZERO_VEC_PTR, fold_evals_t
-
-
-def air_skip_conversion(b: Const, m_t: Const, prev_fs, v_t, gamma_powers, lagrange_on_d):
-    # sec 2.1 rows 6-7 for one table with b_t = b > 0: b-round degree-2 conversion
-    # sumcheck on V_t = sum_c gamma^c * fold_evals_{t,c}, then g_hat_t and the
-    # terminal check w_t(s_t) * sum_c gamma^c * g_hat_{t,c} == V_final
-    # (verify_execution.rs:213-227).
-    s_arr = Array(b * DIM)
-    fs: Mut = prev_fs
-    fs, v_final = air_skip_conversion_rounds(fs, b, v_t, s_arr)
-    fs, ghat = fs_receive_ef_inlined(fs, m_t)
-    # w_t(s) = sum_j ell_j * eq_s[j]; ell_j = sub[rev_b(j)] with the coherence
-    # subset-sums sub[m] = sum over i congruent to m mod 2^b of L[i]
-    # (univariate_skip.rs sub_block_lagrange_from_global).
-    eq_s = compute_eq_mle_extension(s_arr, b)
-    w_s: Mut = ZERO_VEC_PTR
-    for j in unroll(0, 2**b):
-        sub_jr: Mut = lagrange_on_d + AIR_SKIP_BIT_REV[b][j] * DIM
-        for q in unroll(1, 2 ** (AIR_SKIP_K - b)):
-            sub_jr = add_extension_ret(sub_jr, lagrange_on_d + (q * 2**b + AIR_SKIP_BIT_REV[b][j]) * DIM)
-        w_s = add_extension_ret(w_s, mul_extension_ret(sub_jr, eq_s + j * DIM))
-    ghat_gamma = dot_product_ee_ret(ghat, gamma_powers, m_t)
-    copy_ef(mul_extension_ret(w_s, ghat_gamma), v_final)  # terminal conversion check
-    return fs, s_arr, ghat
 
 
 def compute_column_prefixes(first_col_offset, n_vars, point, n_cols: Const):

@@ -370,63 +370,6 @@ fn build_replacements(log_inner_bytecode: usize, bytecode_zero_eval: F) -> BTree
         (ALL_TABLES.iter().map(|t| t.degree_air()).max().unwrap() + 1).to_string(),
     );
     replacements.insert(
-        "AIR_SKIP_K_PLACEHOLDER".to_string(),
-        sub_protocols::AIR_UNIVARIATE_SKIP.to_string(),
-    );
-    replacements.insert(
-        "AIR_SKIP_N_UNI_COEFFS_PLACEHOLDER".to_string(),
-        sub_protocols::air_skip_n_uni_coeffs(
-            ALL_TABLES.iter().map(|t| t.degree_air()).max().unwrap() + 1,
-            sub_protocols::AIR_UNIVARIATE_SKIP,
-        )
-        .to_string(),
-    );
-    {
-        // Constant tables for the in-circuit univariate-skip verification: the
-        // zkdsl grammar has no hex/pow/comprehensions, so omega powers, Lagrange
-        // numerator constants (omega^m / 2^k) and bit-reversal tables are
-        // computed here and injected as decimal array literals.
-        let k_skip = sub_protocols::AIR_UNIVARIATE_SKIP;
-        let m = 1usize << k_skip;
-        let omega = F::two_adic_generator(k_skip);
-        let inv_m = F::from_usize(m).inverse();
-        let mut w = F::ONE;
-        let mut omega_pows = Vec::with_capacity(m);
-        let mut lagrange_num = Vec::with_capacity(m);
-        for _ in 0..m {
-            omega_pows.push(w.as_canonical_u64().to_string());
-            lagrange_num.push((w * inv_m).as_canonical_u64().to_string());
-            w *= omega;
-        }
-        replacements.insert(
-            "AIR_SKIP_OMEGA_POWERS_PLACEHOLDER".to_string(),
-            format!("[{}]", omega_pows.join(", ")),
-        );
-        replacements.insert(
-            "AIR_SKIP_LAGRANGE_NUM_PLACEHOLDER".to_string(),
-            format!("[{}]", lagrange_num.join(", ")),
-        );
-        let rev_tables: Vec<String> = (0..=k_skip)
-            .map(|b| {
-                let revs: Vec<String> = (0..1usize << b)
-                    .map(|j: usize| {
-                        let r = if b == 0 {
-                            0
-                        } else {
-                            j.reverse_bits() >> (usize::BITS as usize - b)
-                        };
-                        r.to_string()
-                    })
-                    .collect();
-                format!("[{}]", revs.join(", "))
-            })
-            .collect();
-        replacements.insert(
-            "AIR_SKIP_BIT_REV_PLACEHOLDER".to_string(),
-            format!("[{}]", rev_tables.join(", ")),
-        );
-    }
-    replacements.insert(
         "N_AIR_COLUMNS_PLACEHOLDER".to_string(),
         format!("[{}]", n_air_columns.join(", ")),
     );

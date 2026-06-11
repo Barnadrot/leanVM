@@ -14,6 +14,3 @@ pub use sc_computation::*;
 
 mod product_computation;
 pub use product_computation::*;
-
-mod univariate_skip;
-pub use univariate_skip::*;
