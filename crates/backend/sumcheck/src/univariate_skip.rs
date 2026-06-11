@@ -35,7 +35,9 @@
 //! Lagrange-to-tensor conversion. The kernels below support that protocol;
 //! the decision on the conversion step is above this module's pay grade.
 
+use fiat_shamir::FSProver;
 use field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, TwoAdicField};
+use poly::PF;
 
 /// Synthetic challenges `c̃_r = r0^(2^(k-1-r))` for `r = 0..k`, in round order
 /// (`c̃_0` first). For `k = 4`: `(r0⁸, r0⁴, r0², r0)`.
@@ -102,6 +104,73 @@ pub fn lagrange_evals_on_subgroup<F: TwoAdicField, EF: ExtensionField<F>>(r0: EF
         w *= omega;
     }
     out
+}
+
+/// Coherence subset-sums (plan_spec v2 §1): from the global Lagrange values
+/// `global[ĩ] = L^{(k)}_ĩ(r0)` (length `2^k`, node `ĩ ↔ ω_k^ĩ`), produce the
+/// length-`2^b` vector `out[m] = L^{(b)}_m(r0^{2^{k−b}})` via
+/// `out[m] = Σ_{ĩ ≡ m (mod 2^b)} global[ĩ]`.
+///
+/// Identity: values that are `2^b`-periodic in the node index interpolate to a
+/// polynomial in `y^{2^{k−b}}` (degree `< 2^k` uniqueness), so the weight any
+/// `v_m` receives at `r0` is the same on both sides — for all `v` — giving
+/// coefficient-wise equality. Pinned by `sub_block_lagrange_coherence` below.
+#[must_use]
+pub fn sub_block_lagrange_from_global<EF: PrimeCharacteristicRing + Copy>(global: &[EF], b: usize) -> Vec<EF> {
+    let m = 1usize << b;
+    assert!(global.len() >= m && global.len().is_multiple_of(m));
+    let mut out = vec![EF::ZERO; m];
+    for (i, &g) in global.iter().enumerate() {
+        out[i & (m - 1)] += g;
+    }
+    out
+}
+
+/// Prover side of the terminal Lagrange-to-tensor conversion sumcheck
+/// (plan_spec v2 §2.3): a `b`-round, degree-2 product sumcheck of the two
+/// `2^b`-sized extension arrays `weights` (public Lagrange weights `ℓ_j`) and
+/// `g_gamma` (the γ-RLC'd block partial evaluations `G_γ(j)`).
+///
+/// Round `r` binds bit `r` of the block-local index `j` (LSB-first, mirroring
+/// the global fold convention). Each round message is sent with the
+/// `eq_alpha: None` Fiat–Shamir path (`add_sumcheck_polynomial(&[c0,c1,c2],
+/// None)`), matching what `sumcheck_verify(state, b, 2, claim, None)` expects.
+///
+/// Returns `(challenges in round order, w(s)·g(s))`. The MLE point for either
+/// array is the REVERSED challenge vector (round `r` ↔ MLE coordinate
+/// `b−1−r`).
+pub fn prove_weighted_block_sumcheck<EF: ExtensionField<PF<EF>>>(
+    prover_state: &mut impl FSProver<EF>,
+    mut weights: Vec<EF>,
+    mut g_gamma: Vec<EF>,
+) -> (Vec<EF>, EF) {
+    assert_eq!(weights.len(), g_gamma.len());
+    assert!(weights.len().is_power_of_two() && weights.len() >= 2);
+    let b = weights.len().ilog2() as usize;
+    let mut challenges = Vec::with_capacity(b);
+    for _ in 0..b {
+        let half = weights.len() / 2;
+        let (mut c0, mut c1, mut c2) = (EF::ZERO, EF::ZERO, EF::ZERO);
+        for m in 0..half {
+            let (w0, w1) = (weights[2 * m], weights[2 * m + 1]);
+            let (g0, g1) = (g_gamma[2 * m], g_gamma[2 * m + 1]);
+            let dw = w1 - w0;
+            let dg = g1 - g0;
+            c0 += w0 * g0;
+            c1 += w0 * dg + g0 * dw;
+            c2 += dw * dg;
+        }
+        prover_state.add_sumcheck_polynomial(&[c0, c1, c2], None);
+        let r = prover_state.sample();
+        challenges.push(r);
+        for m in 0..half {
+            weights[m] = weights[2 * m] + (weights[2 * m + 1] - weights[2 * m]) * r;
+            g_gamma[m] = g_gamma[2 * m] + (g_gamma[2 * m + 1] - g_gamma[2 * m]) * r;
+        }
+        weights.truncate(half);
+        g_gamma.truncate(half);
+    }
+    (challenges, weights[0] * g_gamma[0])
 }
 
 fn bit_reverse_indices(b: usize) -> Vec<usize> {
@@ -365,6 +434,28 @@ mod tests {
                     assert_eq!(coset_j[p], horner(&poly, EF::from(point)), "b={b} j={j} p={p}");
                 }
                 point *= omega;
+            }
+        }
+    }
+
+    /// Coherence identity (plan_spec v2 §1, review invariant 2d):
+    /// `sub_block_lagrange_from_global(lagrange_evals_on_subgroup(r0, k), b)`
+    /// equals `lagrange_evals_on_subgroup(r0^(2^(k−b)), b)`.
+    #[test]
+    fn sub_block_lagrange_coherence() {
+        let mut rng = Rng(7);
+        for k in 3..=5usize {
+            for b in 1..=k {
+                let r0 = rng.ef();
+                let global = lagrange_evals_on_subgroup::<F, EF>(r0, k);
+                let derived = sub_block_lagrange_from_global(&global, b);
+                let rho = r0.exp_power_of_2(k - b);
+                let direct = lagrange_evals_on_subgroup::<F, EF>(rho, b);
+                assert_eq!(derived, direct, "k={k} b={b}");
+                // Σ_m L_m = 1 (interpolant of the constant 1) — the property
+                // that makes Lagrange-folding preserve constant padding blocks.
+                let one: EF = derived.iter().copied().sum();
+                assert_eq!(one, EF::ONE, "k={k} b={b}");
             }
         }
     }

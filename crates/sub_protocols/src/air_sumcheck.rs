@@ -121,6 +121,99 @@ where
             rounds_done: 0,
         }
     }
+
+    /// Post-univariate-skip session (plan_spec v2 §3.5): the columns are the
+    /// Lagrange-folded (extension-field) multilinears of size `2^{n_t − b_t}`,
+    /// entering the same right-to-left fold schedule as a regular session.
+    ///
+    /// * `folded` — `MleGroupOwned::ExtensionPacked` (or any variant; non-packed
+    ///   inputs and tiny tables fall back to unpacked `Extension` storage).
+    /// * `eq_factor` — the truncated bus point `β^x_t` (length `n_t − b_t`),
+    ///   same orientation as [`AirSumcheckSession::new`].
+    /// * `sum` — the table's post-skip claim `Q'_t(ρ_t)`; the public factor
+    ///   `κ_t = A_t(r0)` is NOT part of the session — it is passed to
+    ///   [`prove_batched_air_sumcheck_with_factors`] as `initial_k`.
+    /// * `non_padded_n_rows` — the folded-domain active length, i.e. the
+    ///   original `non_padded.div_ceil(2^{b_t})`. Lagrange-folding a constant
+    ///   padding block reproduces the padding value (`Σ_j ℓ_j = 1`), so the
+    ///   padding analytics (`constraints_eval_at_padding`, `padding_eq_sum`)
+    ///   keep their semantics verbatim.
+    pub fn new_post_skip(
+        folded: MleGroupOwned<EF>,
+        eq_factor: Vec<EF>,
+        sum: EF,
+        computation: A,
+        extra_data: A::ExtraData,
+        non_padded_n_rows: usize,
+    ) -> Self {
+        let initial_n_vars = folded.n_vars();
+        assert_eq!(eq_factor.len(), initial_n_vars);
+        let last_point = column_evals(&folded.by_ref(), (1 << initial_n_vars) - 1);
+        let constraints_eval_at_padding = A::eval_extension(&computation, &last_point, &extra_data);
+
+        let pivot = ENDIANNESS_PIVOT_AIR.min(initial_n_vars);
+        let has_packed_phase = pivot > packing_log_width::<EF>();
+
+        let padded_n_rows = non_padded_n_rows
+            .next_multiple_of(1usize << pivot)
+            .min(1usize << initial_n_vars);
+
+        let chunk_size = 1usize << pivot;
+        let shift = usize::BITS as usize - pivot;
+        let reverse_chunks = |src: &[EF]| -> Vec<EF> {
+            let mut dst = vec![EF::ZERO; src.len()];
+            for (src_chunk, dst_chunk) in src.chunks_exact(chunk_size).zip(dst.chunks_exact_mut(chunk_size)) {
+                for (p, slot) in dst_chunk.iter_mut().enumerate() {
+                    *slot = src_chunk[p.reverse_bits() >> shift];
+                }
+            }
+            dst
+        };
+
+        let multilinears: MleGroup<'a, EF> = match (folded, has_packed_phase) {
+            (MleGroupOwned::ExtensionPacked(cols), true) => {
+                // EFPacking is SoA; the in-chunk bit reversal permutes logical
+                // (lane-crossing) positions, so go through scalars per column.
+                let _span = info_span!("chunk-bit-reversing columns").entered();
+                let mut bit_reversed: Vec<ArenaVec<EFPacking<EF>>> = vec![ArenaVec::new(); cols.len()];
+                parallel::par_chunks_mut(&mut bit_reversed, 1, |i, out_slot| {
+                    let unpacked: Vec<EF> = unpack_extension(&cols[i]);
+                    out_slot[0] = pack_extension(&reverse_chunks(&unpacked));
+                });
+                MleGroup::Owned(MleGroupOwned::ExtensionPacked(bit_reversed))
+            }
+            (folded, _) => {
+                // No packed phase (tables at/below the packing width boundary):
+                // run every round on unpacked extension storage.
+                let _span = info_span!("chunk-bit-reversing columns").entered();
+                let unpacked_group = folded.by_ref().unpack().as_owned_or_clone();
+                let cols = match unpacked_group {
+                    MleGroupOwned::Extension(cols) => cols,
+                    MleGroupOwned::Base(cols) => cols
+                        .iter()
+                        .map(|c| ArenaVec::from_iter(c.iter().map(|&x| EF::from(x))))
+                        .collect(),
+                    _ => unreachable!("unpack() returns scalar storage"),
+                };
+                let bit_reversed: Vec<ArenaVec<EF>> =
+                    cols.iter().map(|c| ArenaVec::from_slice(&reverse_chunks(c))).collect();
+                MleGroup::Owned(MleGroupOwned::Extension(bit_reversed))
+            }
+        };
+
+        Self {
+            multilinears,
+            eq_factor,
+            current_unpadded_len: padded_n_rows,
+            sum,
+            missing_mul_factor: EF::ONE,
+            computation,
+            extra_data,
+            initial_n_vars,
+            constraints_eval_at_padding,
+            rounds_done: 0,
+        }
+    }
 }
 
 impl<'a, EF, A> AirSumcheckSession<'a, EF, A>
@@ -431,16 +524,32 @@ where
     acc.into_iter().map(unpack_sum).collect()
 }
 
-#[instrument(skip_all)]
 pub fn prove_batched_air_sumcheck<'a, EF: ExtensionField<PF<EF>>>(
     prover_state: &mut impl FSProver<EF>,
     sessions: &mut [Box<dyn OuterSumcheckSession<EF> + 'a>],
 ) -> MultilinearPoint<EF> {
+    let ones = vec![EF::ONE; sessions.len()];
+    prove_batched_air_sumcheck_with_factors(prover_state, sessions, ones)
+}
+
+/// Generalization of [`prove_batched_air_sumcheck`] where each session's
+/// contribution carries an initial multiplicative factor `initial_k[t]`
+/// (plan_spec v2 §3.6): the back-loading accumulator `k[t]` — which collects
+/// the products of pre-join challenges for late-joining tables — is seeded
+/// with `initial_k[t]` instead of `ONE`. With all-ones this is byte-identical
+/// to the original driver (golden test `with_factors_ones_is_byte_identical`).
+#[instrument(name = "prove_batched_air_sumcheck", skip_all)]
+pub fn prove_batched_air_sumcheck_with_factors<'a, EF: ExtensionField<PF<EF>>>(
+    prover_state: &mut impl FSProver<EF>,
+    sessions: &mut [Box<dyn OuterSumcheckSession<EF> + 'a>],
+    initial_k: Vec<EF>,
+) -> MultilinearPoint<EF> {
+    assert_eq!(initial_k.len(), sessions.len());
     let n_rounds = sessions.iter().map(|s| s.initial_n_vars()).max().unwrap_or(0);
     let max_full_degree = sessions.iter().map(|s| s.bare_degree() + 1).max().unwrap_or(1);
 
     let mut challenges = Vec::with_capacity(n_rounds);
-    let mut k: Vec<EF> = vec![EF::ONE; sessions.len()];
+    let mut k: Vec<EF> = initial_k;
 
     for round in 0..n_rounds {
         let _round_span = info_span!("air_round", round = round).entered();
