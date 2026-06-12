@@ -520,9 +520,7 @@ unsafe fn mds_output<const I: usize>(s: &[__m512i; 8], s_hi: &[__m512i; 8]) -> _
 /// `vpmuludq`, while the `vpaddq` it replaces was happily dual-issuing on the
 /// add ports. Kept the `vpmuludq + vpaddq` form.
 #[inline(always)]
-pub(crate) fn mds_mul_simd(
-    state: [PackedGoldilocksAVX512; POSEIDON1_WIDTH],
-) -> [PackedGoldilocksAVX512; POSEIDON1_WIDTH] {
+pub fn mds_mul_simd(state: [PackedGoldilocksAVX512; POSEIDON1_WIDTH]) -> [PackedGoldilocksAVX512; POSEIDON1_WIDTH] {
     unsafe {
         let s: [__m512i; 8] = [
             state[0].to_vector(),

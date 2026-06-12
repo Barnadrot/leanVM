@@ -235,6 +235,114 @@ pub fn compute_poseidon8_witness(input: [F; WIDTH]) -> (Vec<F>, [F; WIDTH]) {
     (aux, state)
 }
 
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+mod packed_witness {
+    use super::*;
+    use backend::{PackedGoldilocksAVX512 as P, mds_mul_simd};
+
+    /// Rows processed per packed call — one row per AVX512 lane.
+    pub const WITNESS_LANES: usize = 8;
+
+    #[inline(always)]
+    fn sbox7_p(x: P) -> P {
+        let x2 = x * x;
+        let x4 = x2 * x2;
+        x4 * x2 * x
+    }
+
+    #[inline(always)]
+    fn bcast(c: F) -> P {
+        P([c; WITNESS_LANES])
+    }
+
+    /// Row-major convenience wrapper over [`compute_poseidon8_witness_packed`]:
+    /// transposes 8 scalar input rows into packed lanes first.
+    pub fn compute_poseidon8_witness_x8(inputs: &[[F; WIDTH]; WITNESS_LANES]) -> ([P; AUX_COLS_PER_ROW], [P; WIDTH]) {
+        let state: [P; WIDTH] = std::array::from_fn(|j| P(std::array::from_fn(|l| inputs[l][j])));
+        compute_poseidon8_witness_packed(state)
+    }
+
+    /// 8-lane packed variant of [`compute_poseidon8_witness`]: replays 8
+    /// independent permutations in lockstep, one row per SIMD lane. Takes and
+    /// returns packed column-major data — lane `l` of `aux[k]` equals row
+    /// `l`'s scalar `aux[k]` — so a deferred trace fill can load 8 consecutive
+    /// rows of each input column and store each `aux[k]` into 8 consecutive
+    /// rows of its column with single 64-byte copies. The MDS reuses the
+    /// backend's delayed-reduction `mds_mul_simd`; everything else uses the
+    /// fully-reducing packed ops, so every emitted value is field-equal to the
+    /// scalar path's.
+    pub fn compute_poseidon8_witness_packed(mut state: [P; WIDTH]) -> ([P; AUX_COLS_PER_ROW], [P; WIDTH]) {
+        let c = get_partial_constants();
+        let mut aux = [P::ZERO; AUX_COLS_PER_ROW];
+        let mut k = 0;
+
+        // Initial full rounds.
+        for rc in GOLDILOCKS_POSEIDON1_RC_8.iter().take(POSEIDON1_HALF_FULL_ROUNDS) {
+            for (j, s) in state.iter_mut().enumerate() {
+                *s = sbox7_p(*s + bcast(rc[j]));
+            }
+            state = mds_mul_simd(state);
+            aux[k..k + WIDTH].copy_from_slice(&state);
+            k += WIDTH;
+        }
+
+        // Partial phase: absorb first_round_constants, apply m_i, then sparse rounds.
+        for (j, s) in state.iter_mut().enumerate() {
+            *s += bcast(c.first_round_constants[j]);
+        }
+        {
+            let mut after = [P::ZERO; WIDTH];
+            for (i, dst) in after.iter_mut().enumerate() {
+                let mut acc = P::ZERO;
+                for (j, sj) in state.iter().enumerate() {
+                    acc += *sj * bcast(c.m_i[i][j]);
+                }
+                *dst = acc;
+            }
+            state = after;
+        }
+
+        for r in 0..SPARSE_PARTIAL_ROUNDS {
+            let post_sbox = sbox7_p(state[0]);
+            aux[k] = post_sbox;
+            k += 1;
+
+            state[0] = if r < SPARSE_PARTIAL_ROUNDS - 1 {
+                post_sbox + bcast(c.round_constants[r])
+            } else {
+                post_sbox
+            };
+
+            let old_s0 = state[0];
+            let mut new_s0 = P::ZERO;
+            for (j, sj) in state.iter().enumerate() {
+                new_s0 += *sj * bcast(c.sparse_first_row[r][j]);
+            }
+            state[0] = new_s0;
+            for (i, s) in state.iter_mut().enumerate().skip(1) {
+                *s += old_s0 * bcast(c.v[r][i - 1]);
+            }
+        }
+
+        // Terminal full rounds.
+        for round in 0..POSEIDON1_HALF_FULL_ROUNDS {
+            let abs = POSEIDON1_HALF_FULL_ROUNDS + POSEIDON1_PARTIAL_ROUNDS + round;
+            for (j, s) in state.iter_mut().enumerate() {
+                *s = sbox7_p(*s + bcast(GOLDILOCKS_POSEIDON1_RC_8[abs][j]));
+            }
+            state = mds_mul_simd(state);
+            aux[k..k + WIDTH].copy_from_slice(&state);
+            k += WIDTH;
+        }
+
+        debug_assert_eq!(k, AUX_COLS_PER_ROW);
+        (aux, state)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+pub use packed_witness::{WITNESS_LANES, compute_poseidon8_witness_packed, compute_poseidon8_witness_x8};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Poseidon8Precompile<const BUS: bool>;
 
@@ -359,7 +467,12 @@ impl<const BUS: bool> TableT for Poseidon8Precompile<BUS> {
             .get_slice_into(left_second_addr, &mut input[HALF_DIGEST_LEN..DIGEST])?;
         ctx.memory.get_slice_into(arg_b.to_usize(), &mut input[DIGEST..])?;
 
-        let (aux, perm_state) = compute_poseidon8_witness(input);
+        // h12 C-2: the per-round witness columns are deferred to
+        // `fill_trace_poseidon_8`'s packed parallel pass — the inline path only
+        // needs the permutation output, via the backend's fast scalar permute
+        // (field-equal to the sparse witness replay, see sparse.rs equivalence
+        // tests).
+        let perm_state = poseidon8_permute(input);
 
         // `output_cols` are the WIDTH output trace columns. For permute rows they
         // hold the raw permutation state; for compression rows `out_lo`
@@ -405,9 +518,8 @@ impl<const BUS: bool> TableT for Poseidon8Precompile<BUS> {
         for (i, value) in output_cols.iter().enumerate() {
             trace.columns[POSEIDON_8_COL_OUT_LO + i].push(*value);
         }
-        for (i, value) in aux.iter().enumerate() {
-            trace.columns[POSEIDON_8_COL_ROUND_START + i].push(*value);
-        }
+        // The aux columns (POSEIDON_8_COL_ROUND_START..) stay empty here —
+        // `fill_trace_poseidon_8` recomputes them from the input columns.
         // Non-committed columns
         trace.columns[POSEIDON_8_COL_NU_A].push(arg_a);
         let domainsep = POSEIDON_DOMAINSEP_BASE
@@ -784,6 +896,94 @@ mod mds_u128_tests {
             "compute_poseidon8_witness: {:?} for 10k perms ({:.0} ns/perm), sink={sink:?}",
             dt,
             dt.as_nanos() as f64 / 10_000.0
+        );
+    }
+
+    /// Deferred-fill equivalence: `fill_trace_poseidon_8` must emit, for every
+    /// row, exactly the values the scalar witness replay produces — including
+    /// the trailing rows that don't fill a packed block (n chosen odd).
+    #[test]
+    fn deferred_aux_fill_equals_scalar() {
+        let mut seed = 0xDEADBEEF_u64;
+        let n = 1003;
+        let mut trace: Vec<ArenaVec<F>> = (0..num_cols_total_poseidon_8()).map(|_| ArenaVec::new()).collect();
+        for (c, col) in trace.iter_mut().enumerate() {
+            if (POSEIDON_8_COL_ROUND_START..POSEIDON_8_COL_ROUND_START + AUX_COLS_PER_ROW).contains(&c) {
+                continue; // deferred — left empty, exactly as execute() leaves them
+            }
+            for _ in 0..n {
+                col.push(F::from_u64(xorshift(&mut seed)));
+            }
+        }
+        fill_trace_poseidon_8(&mut trace);
+
+        assert!(trace.iter().all(|col| col.len() == n));
+        for i in 0..n {
+            let input: [F; WIDTH] = std::array::from_fn(|j| trace[POSEIDON_8_COL_INPUT_START + j][i]);
+            let (aux, _) = compute_poseidon8_witness(input);
+            for (k, v) in aux.iter().enumerate() {
+                assert_eq!(trace[POSEIDON_8_COL_ROUND_START + k][i], *v, "aux[{k}] row {i}");
+            }
+        }
+    }
+
+    /// C-2 PRE-GATE microbench: packed 8-lane witness kernel vs the scalar
+    /// post-C-1 path. Bar: >= 2.5x or C-2 is skipped.
+    #[test]
+    #[ignore]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    fn packed_witness_microbench() {
+        const BATCHES: usize = 16_384; // 131_072 perms per timed rep
+
+        let mut seed = 0xC0FFEE_u64;
+        let inputs: Vec<[[F; WIDTH]; WITNESS_LANES]> = (0..BATCHES)
+            .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| F::from_u64(xorshift(&mut seed)))))
+            .collect();
+
+        // Field-equality of every emitted value vs the scalar reference.
+        for batch in inputs.iter().take(64) {
+            let (aux_p, out_p) = compute_poseidon8_witness_x8(batch);
+            for l in 0..WITNESS_LANES {
+                let (aux_s, out_s) = compute_poseidon8_witness(batch[l]);
+                for (k, a) in aux_s.iter().enumerate() {
+                    assert_eq!(aux_p[k].0[l], *a, "aux[{k}] lane {l}");
+                }
+                for j in 0..WIDTH {
+                    assert_eq!(out_p[j].0[l], out_s[j], "out[{j}] lane {l}");
+                }
+            }
+        }
+
+        // 3 alternating timed reps each; take the min.
+        let mut scalar_best = std::time::Duration::MAX;
+        let mut packed_best = std::time::Duration::MAX;
+        let mut sink = F::ZERO;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            for batch in &inputs {
+                for inp in batch {
+                    let (aux, out) = compute_poseidon8_witness(*inp);
+                    sink += out[0] + aux[AUX_COLS_PER_ROW - 1];
+                }
+            }
+            scalar_best = scalar_best.min(t.elapsed());
+
+            let t = std::time::Instant::now();
+            for batch in &inputs {
+                let (aux, out) = compute_poseidon8_witness_x8(batch);
+                sink += out[0].0[0] + aux[AUX_COLS_PER_ROW - 1].0[WITNESS_LANES - 1];
+            }
+            packed_best = packed_best.min(t.elapsed());
+        }
+
+        let n_perms = (BATCHES * WITNESS_LANES) as f64;
+        println!(
+            "scalar {:?} ({:.0} ns/perm) | packed {:?} ({:.0} ns/perm) | speedup {:.2}x | sink={sink:?}",
+            scalar_best,
+            scalar_best.as_nanos() as f64 / n_perms,
+            packed_best,
+            packed_best.as_nanos() as f64 / n_perms,
+            scalar_best.as_secs_f64() / packed_best.as_secs_f64(),
         );
     }
 }
