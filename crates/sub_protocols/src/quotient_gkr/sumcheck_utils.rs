@@ -392,7 +392,6 @@ fn fold_normal_with_padding<EF: ExtensionField<PF<EF>>>(m: &[EF], r: EF, pad_val
     out
 }
 
-#[allow(clippy::needless_range_loop)]
 fn compute_round_packed<EF: ExtensionField<PF<EF>>, N>(
     nums: &[N],
     dens: &[EFPacking<EF>],
@@ -414,49 +413,6 @@ where
     debug_assert_eq!(eq_within.len(), quarter);
 
     let n_chunks = nums.len() / layer_packed;
-    if EF::DIMENSION == 3 {
-        // T5' (plan_spec §7, site a): defer the eq_within-weighted accumulation.
-        // Four passes over the L2-resident chunk, ONE 12-zmm lazy accumulator live
-        // per pass (T4 register-pressure envelope); pair_coeffs' six canonical
-        // products split 1/1/2/2 across the passes with no recomputation overlap.
-        // Lazy contract: <= 5 terms/iteration (c1 row), quarter <= 2^20 iterations.
-        debug_assert!(quarter <= 1 << 20);
-        return parallel::map_reduce(
-            n_chunks,
-            RoundCoeffs::zero,
-            |c| {
-                let n_c = &nums[c * layer_packed..][..layer_packed];
-                let d_c = &dens[c * layer_packed..][..layer_packed];
-                let eq_o: EF = eq_outer.get(c).copied().unwrap_or(EF::ONE);
-                let lazy_field = |t_of: &dyn Fn(usize) -> EFPacking<EF>| -> EFPacking<EF> {
-                    let mut acc: [[PFPacking<EF>; 4]; 3] = core::array::from_fn(|_| PFPacking::<EF>::lazy_acc_zero());
-                    for inner in 0..quarter {
-                        let t = t_of(inner);
-                        lazy_cubic_quadratic_acc(
-                            &mut acc,
-                            t.as_basis_coefficients_slice(),
-                            eq_within[inner].as_basis_coefficients_slice(),
-                        );
-                    }
-                    let fin = finish_cubic_lazy(acc, quarter as u64);
-                    EFPacking::<EF>::from_basis_coefficients_fn(|j| fin[j])
-                };
-                let local = RoundCoeffs::<EFPacking<EF>> {
-                    c0_den: lazy_field(&|i| d_c[i + half] * d_c[i]),
-                    c2_den: lazy_field(&|i| {
-                        (d_c[i + quarter] - d_c[i]) * (d_c[i + half + quarter] - d_c[i + half])
-                    }),
-                    c0_num: lazy_field(&|i| d_c[i + half] * n_c[i] + d_c[i] * n_c[i + half]),
-                    c2_num: lazy_field(&|i| {
-                        (d_c[i + half + quarter] - d_c[i + half]) * (n_c[i + quarter] - n_c[i])
-                            + (d_c[i + quarter] - d_c[i]) * (n_c[i + half + quarter] - n_c[i + half])
-                    }),
-                };
-                local * eq_o
-            },
-            Add::add,
-        );
-    }
     parallel::map_reduce(
         n_chunks,
         RoundCoeffs::zero,
@@ -480,7 +436,7 @@ where
     )
 }
 
-#[allow(clippy::type_complexity, clippy::needless_range_loop)]
+#[allow(clippy::type_complexity)]
 fn fold_and_compute_round_packed<EF: ExtensionField<PF<EF>>, N>(
     nums: &[N],
     dens: &[EFPacking<EF>],
@@ -527,51 +483,6 @@ where
             let nn_c = unsafe { nn.slice(c * out_packed, out_packed) };
             let nd_c = unsafe { nd.slice(c * out_packed, out_packed) };
             let eq_o: EF = eq_outer.get(c).copied().unwrap_or(EF::ONE);
-            if EF::DIMENSION == 3 {
-                // T5' (plan_spec §7, site a): pass A folds canonically (transcript
-                // values untouched), then four lazy passes accumulate the round
-                // coefficients from the just-written L2-resident folded data —
-                // the T5 fold-kernel pattern (one 12-zmm lazy accumulator live).
-                debug_assert!(in_eighth <= 1 << 20);
-                for i in 0..in_eighth {
-                    for side in 0..2 {
-                        for c in 0..2 {
-                            let lo = i + side * in_half + c * in_eighth;
-                            let hi = lo + in_quarter;
-                            let out = i + side * out_half + c * out_quarter;
-                            nn_c[out] = prev_r_packed * (n_c[hi] - n_c[lo]) + n_c[lo];
-                            nd_c[out] = d_c[lo] + (d_c[hi] - d_c[lo]) * prev_r;
-                        }
-                    }
-                }
-                let lazy_field = |t_of: &dyn Fn(usize) -> EFPacking<EF>| -> EFPacking<EF> {
-                    let mut acc: [[PFPacking<EF>; 4]; 3] = core::array::from_fn(|_| PFPacking::<EF>::lazy_acc_zero());
-                    for i in 0..in_eighth {
-                        let t = t_of(i);
-                        lazy_cubic_quadratic_acc(
-                            &mut acc,
-                            t.as_basis_coefficients_slice(),
-                            eq_within[i].as_basis_coefficients_slice(),
-                        );
-                    }
-                    let fin = finish_cubic_lazy(acc, in_eighth as u64);
-                    EFPacking::<EF>::from_basis_coefficients_fn(|j| fin[j])
-                };
-                let local = RoundCoeffs::<EFPacking<EF>> {
-                    c0_den: lazy_field(&|i| nd_c[i + out_half] * nd_c[i]),
-                    c2_den: lazy_field(&|i| {
-                        (nd_c[i + out_quarter] - nd_c[i]) * (nd_c[i + out_half + out_quarter] - nd_c[i + out_half])
-                    }),
-                    c0_num: lazy_field(&|i| nd_c[i + out_half] * nn_c[i] + nd_c[i] * nn_c[i + out_half]),
-                    c2_num: lazy_field(&|i| {
-                        (nd_c[i + out_half + out_quarter] - nd_c[i + out_half])
-                            * (nn_c[i + out_quarter] - nn_c[i])
-                            + (nd_c[i + out_quarter] - nd_c[i])
-                                * (nn_c[i + out_half + out_quarter] - nn_c[i + out_half])
-                    }),
-                };
-                return local * eq_o;
-            }
             let mut local = RoundCoeffs::<EFPacking<EF>>::zero();
             for i in 0..in_eighth {
                 for side in 0..2 {
@@ -611,194 +522,4 @@ fn build_bare_from_coeffs<EF: ExtensionField<PF<EF>>>(
     let h1_mmf = (sum - (EF::ONE - eq_alpha) * c0_mmf) / eq_alpha;
     let c1_mmf = h1_mmf - c0_mmf - c2_mmf;
     DensePolynomial::new(vec![c0_mmf, c1_mmf, c2_mmf])
-}
-
-#[cfg(test)]
-mod lazy_gkr_round_tests {
-    //! T5' (plan_spec §7, site a) equality oracle: the DIM==3 lazy arms of
-    //! `compute_round_packed` / `fold_and_compute_round_packed` must be
-    //! value-identical to the eager reference on the real Goldilocks cubic
-    //! types the GKR prover dispatches.
-    use super::*;
-    use backend::{BasedVectorSpace, CubicExtensionFieldGL, Goldilocks, PackedValue};
-
-    type EF = CubicExtensionFieldGL;
-    #[allow(clippy::upper_case_acronyms)]
-    type EFP = EFPacking<EF>;
-    #[allow(clippy::upper_case_acronyms)]
-    type PFP = PFPacking<EF>;
-
-    struct Rng(u64);
-    impl Rng {
-        fn next_u64(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            self.0 = x;
-            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        }
-    }
-    fn rnd_pfp(rng: &mut Rng) -> PFP {
-        PFP::from_fn(|_| {
-            let r = rng.next_u64();
-            Goldilocks::new(match r % 7 {
-                0 => 0,
-                1 => u64::MAX,
-                2 => Goldilocks::ORDER_U64,
-                3 => Goldilocks::ORDER_U64 - 1,
-                _ => r,
-            })
-        })
-    }
-    fn rnd_efp(rng: &mut Rng) -> EFP {
-        EFP::from_basis_coefficients_fn(|_| rnd_pfp(rng))
-    }
-    fn rnd_ef(rng: &mut Rng) -> EF {
-        EF::from_basis_coefficients_fn(|_| Goldilocks::new(rng.next_u64()))
-    }
-
-    fn eager_round_coeffs<N>(
-        nums: &[N],
-        dens: &[EFP],
-        layer_chunk_log: usize,
-        eq_outer: &[EF],
-        eq_within: &[EFP],
-    ) -> RoundCoeffs<EFP>
-    where
-        N: PrimeCharacteristicRing + Copy + Send + Sync,
-        EFP: Algebra<N>,
-    {
-        // Verbatim transplant of the eager arm (the reference semantics).
-        let w = packing_log_width::<EF>();
-        let layer_packed = 1usize << (layer_chunk_log - w);
-        let half = layer_packed / 2;
-        let quarter = layer_packed / 4;
-        let n_chunks = nums.len() / layer_packed;
-        let mut total = RoundCoeffs::<EFP>::zero();
-        for c in 0..n_chunks {
-            let n_c = &nums[c * layer_packed..][..layer_packed];
-            let d_c = &dens[c * layer_packed..][..layer_packed];
-            let eq_o: EF = eq_outer.get(c).copied().unwrap_or(EF::ONE);
-            let mut local = RoundCoeffs::<EFP>::zero();
-            for inner in 0..quarter {
-                let coeffs = pair_coeffs::<EFP, _>(
-                    (n_c[inner], n_c[inner + quarter]),
-                    (n_c[inner + half], n_c[inner + half + quarter]),
-                    (d_c[inner], d_c[inner + quarter]),
-                    (d_c[inner + half], d_c[inner + half + quarter]),
-                );
-                local += coeffs * eq_within[inner];
-            }
-            total += local * eq_o;
-        }
-        total
-    }
-
-    fn assert_rc_eq(a: &RoundCoeffs<EFP>, b: &RoundCoeffs<EFP>, ctx: &str) {
-        let unpack =
-            |x: EFP| <EFP as backend::PackedFieldExtension<Goldilocks, EF>>::to_ext_iter([x]).collect::<Vec<EF>>();
-        assert_eq!(unpack(a.c0_den), unpack(b.c0_den), "{ctx}: c0_den");
-        assert_eq!(unpack(a.c2_den), unpack(b.c2_den), "{ctx}: c2_den");
-        assert_eq!(unpack(a.c0_num), unpack(b.c0_num), "{ctx}: c0_num");
-        assert_eq!(unpack(a.c2_num), unpack(b.c2_num), "{ctx}: c2_num");
-    }
-
-    #[test]
-    fn compute_round_packed_lazy_matches_eager() {
-        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        let w = packing_log_width::<EF>();
-        for &layer_chunk_log in &[w + 2, w + 3, w + 5] {
-            let layer_packed = 1usize << (layer_chunk_log - w);
-            for &n_chunks in &[1usize, 3] {
-                let n = n_chunks * layer_packed;
-                let dens: Vec<EFP> = (0..n).map(|_| rnd_efp(&mut rng)).collect();
-                let eq_outer: Vec<EF> = (0..n_chunks).map(|_| rnd_ef(&mut rng)).collect();
-                let eq_within: Vec<EFP> = (0..layer_packed / 4).map(|_| rnd_efp(&mut rng)).collect();
-                // ext nums arm
-                let nums_e: Vec<EFP> = (0..n).map(|_| rnd_efp(&mut rng)).collect();
-                let got = compute_round_packed::<EF, EFP>(&nums_e, &dens, layer_chunk_log, &eq_outer, &eq_within);
-                let want = eager_round_coeffs::<EFP>(&nums_e, &dens, layer_chunk_log, &eq_outer, &eq_within);
-                assert_rc_eq(&got, &want, &format!("ext nums lcl={layer_chunk_log} nc={n_chunks}"));
-                // base nums arm
-                let nums_b: Vec<PFP> = (0..n).map(|_| rnd_pfp(&mut rng)).collect();
-                let got = compute_round_packed::<EF, PFP>(&nums_b, &dens, layer_chunk_log, &eq_outer, &eq_within);
-                let want = eager_round_coeffs::<PFP>(&nums_b, &dens, layer_chunk_log, &eq_outer, &eq_within);
-                assert_rc_eq(&got, &want, &format!("base nums lcl={layer_chunk_log} nc={n_chunks}"));
-            }
-        }
-    }
-
-    #[test]
-    fn fold_and_compute_round_packed_lazy_matches_eager() {
-        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
-        let w = packing_log_width::<EF>();
-        for &layer_chunk_log_old in &[w + 3, w + 4, w + 6] {
-            let in_packed = 1usize << (layer_chunk_log_old - w);
-            for &n_chunks in &[1usize, 2] {
-                let n = n_chunks * in_packed;
-                let nums: Vec<EFP> = (0..n).map(|_| rnd_efp(&mut rng)).collect();
-                let dens: Vec<EFP> = (0..n).map(|_| rnd_efp(&mut rng)).collect();
-                let eq_outer: Vec<EF> = (0..n_chunks).map(|_| rnd_ef(&mut rng)).collect();
-                let eq_within: Vec<EFP> = (0..in_packed / 8).map(|_| rnd_efp(&mut rng)).collect();
-                let prev_r = rnd_ef(&mut rng);
-                let (nn, nd, got) = fold_and_compute_round_packed::<EF, EFP>(
-                    &nums,
-                    &dens,
-                    layer_chunk_log_old,
-                    prev_r,
-                    &eq_outer,
-                    &eq_within,
-                );
-                // Eager reference: fold formula + round coeffs over folded data.
-                let prev_r_packed: EFP = EFP::from(prev_r);
-                let in_half = in_packed / 2;
-                let in_quarter = in_packed / 4;
-                let in_eighth = in_packed / 8;
-                let out_packed = in_packed / 2;
-                let out_half = out_packed / 2;
-                let out_quarter = out_packed / 4;
-                let mut want_nn = vec![EFP::ZERO; n / 2];
-                let mut want_nd = vec![EFP::ZERO; n / 2];
-                let mut want = RoundCoeffs::<EFP>::zero();
-                for c in 0..n_chunks {
-                    let n_c = &nums[c * in_packed..][..in_packed];
-                    let d_c = &dens[c * in_packed..][..in_packed];
-                    let eq_o: EF = eq_outer.get(c).copied().unwrap_or(EF::ONE);
-                    let mut local = RoundCoeffs::<EFP>::zero();
-                    for i in 0..in_eighth {
-                        for side in 0..2 {
-                            for cc in 0..2 {
-                                let lo = i + side * in_half + cc * in_eighth;
-                                let hi = lo + in_quarter;
-                                let out = i + side * out_half + cc * out_quarter;
-                                want_nn[c * out_packed + out] = prev_r_packed * (n_c[hi] - n_c[lo]) + n_c[lo];
-                                want_nd[c * out_packed + out] = d_c[lo] + (d_c[hi] - d_c[lo]) * prev_r;
-                            }
-                        }
-                    }
-                    let nn_c = &want_nn[c * out_packed..][..out_packed];
-                    let nd_c = &want_nd[c * out_packed..][..out_packed];
-                    for i in 0..in_eighth {
-                        let round = pair_coeffs::<EFP, EFP>(
-                            (nn_c[i], nn_c[i + out_quarter]),
-                            (nn_c[i + out_half], nn_c[i + out_half + out_quarter]),
-                            (nd_c[i], nd_c[i + out_quarter]),
-                            (nd_c[i + out_half], nd_c[i + out_half + out_quarter]),
-                        );
-                        local += round * eq_within[i];
-                    }
-                    want += local * eq_o;
-                }
-                assert_rc_eq(&got, &want, &format!("fold lclo={layer_chunk_log_old} nc={n_chunks}"));
-                let unpack = |v: &[EFP]| {
-                    v.iter()
-                        .flat_map(|&x| <EFP as backend::PackedFieldExtension<Goldilocks, EF>>::to_ext_iter([x]))
-                        .collect::<Vec<EF>>()
-                };
-                assert_eq!(unpack(&nn), unpack(&want_nn), "folded nums");
-                assert_eq!(unpack(&nd), unpack(&want_nd), "folded dens");
-            }
-        }
-    }
 }
