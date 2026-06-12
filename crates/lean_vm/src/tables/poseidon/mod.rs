@@ -974,3 +974,524 @@ mod h1_kill_ladder {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// h-ep U0 kill-ladder rung benches (pw13-mac iter-2, hypothesis "air-efround-pack",
+// plan: experiment_logs .../report/hypothesis_5/). Test-only; no production change.
+// All arms drive the PRODUCTION Air::eval through ConstraintFolderPacked on
+// EXTENSION-packed columns (the 78% region: rounds >= 1 of the AIR sumcheck).
+//
+// U0a  (poseidon, d=10, degree-split): baseline z-loop (full {0,2,3,4} + skip
+//      {5..10}, anchors state_0/state_2, z/2 consts) vs candidate (full
+//      {2,3,4,5} + skip {6..10}, anchors z=2/z=3, (z-2) consts, PLUS the Qbar
+//      bookkeeping: 2x 11-dot E-row reads with EF node weights, acc0 mul,
+//      11 E-row EFP stores). Gate: cand <= 0.97x base else KILL Qbar(poseidon).
+// U0a2 (execution, d=5, no split): baseline 5 full evals {0,2,3,4,5} vs
+//      candidate 4 full evals {2..5} + 2x 6-dot + 6 stores + acc0.
+//      Gate: cand <= 0.97x base => execution table enabled.
+// U0b  (fused fold+eval, poseidon shape): production-fold pass + eval pass vs
+//      single fused pass (4-index map of plan §2.4). Gate: <= 0.97x else KILL
+//      the fusion half.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod u0_kill_ladder {
+    use super::*;
+    use crate::tables::execution::ExecutionTable;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    type EFP = EFPacking<EF>;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_f(&mut self) -> F {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            const P: u64 = (1 << 31) - (1 << 24) + 1;
+            F::from_usize(((self.0 >> 32) % P) as usize)
+        }
+        fn next_ef(&mut self) -> EF {
+            // base-embedded values; mul cost is value-independent
+            EF::from(self.next_f()) * EF::from_usize(998_244_353) + EF::from(self.next_f())
+        }
+        fn next_efp(&mut self) -> EFP {
+            EFP::from(self.next_ef())
+        }
+    }
+
+    fn build_extra(n_alphas: usize) -> ExtraDataForBuses<EF> {
+        let eq_poly: Vec<EF> = (0..1 << LOG_MAX_BUS_WIDTH)
+            .map(|i| EF::from_usize(7 * i + 3) * EF::from_usize(1_000_003) + EF::from_usize(i * i + 11))
+            .collect();
+        let alphas: Vec<EF> = (0..n_alphas)
+            .map(|i| EF::from_usize(13 * i + 5) * EF::from_usize(998_244_353) + EF::from_usize(i + 1))
+            .collect();
+        ExtraDataForBuses::new(&eq_poly, alphas)
+    }
+
+    fn median_time(warmup: usize, reps: usize, mut f: impl FnMut()) -> f64 {
+        let mut times = Vec::new();
+        for rep in 0..(warmup + reps) {
+            let t = Instant::now();
+            f();
+            if rep >= warmup {
+                times.push(t.elapsed().as_secs_f64());
+            }
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[times.len() / 2]
+    }
+
+    /// Poseidon split z-loop on EFP columns. `first_full_z` = 0 (baseline) or
+    /// 2 (candidate). When `qbar` is set, adds the candidate's bookkeeping:
+    /// q0/q1 = (d+1)-dots over `e_prev` rows, acc0 contribution, and E-row
+    /// stores of all d+1 node values into `e_out`.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_poseidon_efp(
+        cols: &[Vec<EFP>],
+        extra: &ExtraDataForBuses<EF>,
+        partial_eq: EFP,
+        n_pairs: usize,
+        first_full_z: usize,
+        qbar: Option<(&[EFP], &mut [EFP], &[EF; 11])>,
+        air: &Poseidon16Precompile<true>,
+    ) -> EFP {
+        const D: usize = 10;
+        const N_FULL: usize = 4; // low_degree + 1
+        let n_flat = N_FLAT_BASELINE_U0;
+        let n_skip = D - N_FULL - if first_full_z == 2 { 1 } else { 0 };
+        // skip-eval cached-state interpolation constants
+        let anchor_consts: Vec<F> = if first_full_z == 0 {
+            // anchors z=0, z=2: cached(z) = s0 + (s2 - s0) * z/2
+            ((N_FULL + 1)..=D).map(|z| F::from_usize(z).halve()).collect()
+        } else {
+            // anchors z=2, z=3: cached(z) = s2 + (s3 - s2) * (z - 2)
+            ((N_FULL + 2)..=D).map(|z| F::from_usize(z - 2)).collect()
+        };
+        let lagrange: [[F; N_FULL]; 6] =
+            std::array::from_fn(|t| std::array::from_fn(|i| F::from_usize(3 + 5 * t + 7 * i)));
+
+        let (e_prev, mut e_out, weights) = match qbar {
+            Some((p, o, w)) => (Some(p), Some(o), Some(w)),
+            None => (None, None, None),
+        };
+
+        let mut acc = vec![EFP::ZERO; D];
+        let mut point: Vec<EFP> = Vec::with_capacity(n_flat);
+        let mut diff: Vec<EFP> = Vec::with_capacity(n_flat);
+        let mut state_a: Vec<EFP> = Vec::new();
+        let mut state_b: Vec<EFP> = Vec::new();
+        let mut cached_buf: Vec<EFP> = Vec::new();
+        let mut low_evals = [EFP::ZERO; N_FULL];
+
+        for j in 0..n_pairs {
+            let (i0, i1) = (2 * j, 2 * j + 1);
+            point.clear();
+            diff.clear();
+            for c in cols.iter().take(n_flat) {
+                let lo = c[i0];
+                let hi = c[i1];
+                point.push(lo);
+                diff.push(hi - lo);
+            }
+
+            let mut e_row_idx = 0usize;
+            if let (Some(prev), Some(out), Some(w)) = (e_prev, e_out.as_deref_mut(), weights) {
+                // Qbar consume: q0/q1 from previous-round E-rows (11-dots, EFP x EF)
+                let r0 = &prev[(2 * j) * 11..(2 * j) * 11 + 11];
+                let r1 = &prev[(2 * j + 1) * 11..(2 * j + 1) * 11 + 11];
+                let mut q0 = EFP::ZERO;
+                let mut q1 = EFP::ZERO;
+                for k in 0..11 {
+                    q0 += r0[k] * w[k];
+                    q1 += r1[k] * w[k];
+                }
+                acc[0] += q0 * partial_eq;
+                out[j * 11] = q0;
+                out[j * 11 + 1] = q1;
+                e_row_idx = 2;
+                // advance point to z=2 for the first full node
+                for k in 0..n_flat {
+                    point[k] += diff[k].double();
+                }
+            }
+
+            // full nodes
+            for z_idx in 0..N_FULL {
+                if z_idx > 0 || first_full_z == 0 {
+                    if z_idx == 1 && first_full_z == 0 {
+                        // baseline z: 0 -> 2 jump
+                        for k in 0..n_flat {
+                            point[k] += diff[k].double();
+                        }
+                    } else if z_idx > 0 {
+                        for k in 0..n_flat {
+                            point[k] += diff[k];
+                        }
+                    }
+                }
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                if z_idx == 0 {
+                    folder.cached_state = Some(std::mem::take(&mut state_a));
+                } else if z_idx == 1 {
+                    folder.cached_state = Some(std::mem::take(&mut state_b));
+                }
+                air.eval(&mut folder, extra);
+                let v = folder.accumulator;
+                let acc_slot = if first_full_z == 0 { z_idx } else { 1 + z_idx };
+                acc[acc_slot] += v * partial_eq;
+                low_evals[z_idx] = folder.accumulator_low;
+                if z_idx == 0 {
+                    state_a = folder.cached_state.unwrap();
+                } else if z_idx == 1 {
+                    state_b = folder.cached_state.unwrap();
+                }
+                if let Some(out) = e_out.as_deref_mut() {
+                    out[j * 11 + e_row_idx] = v;
+                    e_row_idx += 1;
+                }
+            }
+
+            // skip-low evals
+            for t in 0..n_skip {
+                for k in 0..n_flat {
+                    point[k] += diff[k];
+                }
+                cached_buf.clear();
+                for i in 0..state_a.len() {
+                    cached_buf.push(state_a[i] + (state_b[i] - state_a[i]) * PFPacking::<EF>::from(anchor_consts[t]));
+                }
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                folder.skip_low = true;
+                folder.cached_state = Some(std::mem::take(&mut cached_buf));
+                folder.low_ci_count = PARTIAL_ROUNDS;
+                air.eval(&mut folder, extra);
+                cached_buf = folder.cached_state.unwrap();
+                let mut low_interpolated = EFP::ZERO;
+                for (i, lc) in lagrange[t].iter().enumerate() {
+                    low_interpolated += low_evals[i] * PFPacking::<EF>::from(*lc);
+                }
+                let v = folder.accumulator + low_interpolated;
+                let acc_slot = if first_full_z == 0 { N_FULL + t } else { 1 + N_FULL + t };
+                acc[acc_slot] += v * partial_eq;
+                if let Some(out) = e_out.as_deref_mut() {
+                    out[j * 11 + e_row_idx] = v;
+                    e_row_idx += 1;
+                }
+            }
+        }
+        acc.into_iter().sum()
+    }
+
+    const N_FLAT_BASELINE_U0: usize = 110;
+
+    #[test]
+    #[ignore]
+    fn u0a_poseidon_efp_rung() {
+        const N_PAIRS: usize = 1024;
+        const PASSES: usize = 8;
+        let mut rng = Lcg(0xA5A5_5A5A_1234_5678);
+        let cols: Vec<Vec<EFP>> = (0..N_FLAT_BASELINE_U0)
+            .map(|_| (0..2 * N_PAIRS).map(|_| rng.next_efp()).collect())
+            .collect();
+        let extra = build_extra(128);
+        let partial_eq = EFP::from(EF::from_usize(123_456_791));
+        let air = Poseidon16Precompile::<true>;
+        let e_prev: Vec<EFP> = (0..2 * N_PAIRS * 11).map(|_| rng.next_efp()).collect();
+        let mut e_out: Vec<EFP> = vec![EFP::ZERO; N_PAIRS * 11];
+        let weights: [EF; 11] = std::array::from_fn(|i| EF::from_usize(31 * i + 17) * EF::from_usize(7_777_777));
+
+        let mut sink = EFP::ZERO;
+        let t_base = median_time(3, 5, || {
+            for _ in 0..PASSES {
+                sink += black_box(drive_poseidon_efp(&cols, &extra, partial_eq, N_PAIRS, 0, None, &air));
+            }
+        });
+        let t_cand = median_time(3, 5, || {
+            for _ in 0..PASSES {
+                sink += black_box(drive_poseidon_efp(
+                    &cols,
+                    &extra,
+                    partial_eq,
+                    N_PAIRS,
+                    2,
+                    Some((&e_prev, &mut e_out, &weights)),
+                    &air,
+                ));
+            }
+        });
+        black_box(sink);
+        let per = 1e9 / (PASSES * N_PAIRS) as f64;
+        let delta = 100.0 * (t_base - t_cand) / t_base;
+        let verdict = if t_cand <= 0.97 * t_base { "PASS" } else { "KILL" };
+        println!(
+            "U0A: baseline {:.0} ns/pair, candidate {:.0} ns/pair, delta {:+.1}% (gate cand <= 0.97x base) => {verdict}",
+            t_base * per,
+            t_cand * per,
+            -delta
+        );
+    }
+
+    /// Execution-shaped rung: production ExecutionTable eval, no degree split.
+    fn drive_exec_efp(
+        cols: &[Vec<EFP>],
+        n_flat: usize,
+        extra: &ExtraDataForBuses<EF>,
+        partial_eq: EFP,
+        n_pairs: usize,
+        candidate: bool,
+        e_prev: &[EFP],
+        e_out: &mut [EFP],
+        weights: &[EF; 6],
+        air: &ExecutionTable<true>,
+    ) -> EFP {
+        const D: usize = 5;
+        let n_cols = cols.len();
+        let mut acc = vec![EFP::ZERO; D];
+        let mut point: Vec<EFP> = Vec::with_capacity(n_cols);
+        let mut diff: Vec<EFP> = Vec::with_capacity(n_cols);
+        for j in 0..n_pairs {
+            let (i0, i1) = (2 * j, 2 * j + 1);
+            point.clear();
+            diff.clear();
+            for c in cols {
+                let lo = c[i0];
+                let hi = c[i1];
+                point.push(lo);
+                diff.push(hi - lo);
+            }
+            let mut e_idx = 0usize;
+            if candidate {
+                let r0 = &e_prev[(2 * j) * 6..(2 * j) * 6 + 6];
+                let r1 = &e_prev[(2 * j + 1) * 6..(2 * j + 1) * 6 + 6];
+                let mut q0 = EFP::ZERO;
+                let mut q1 = EFP::ZERO;
+                for k in 0..6 {
+                    q0 += r0[k] * weights[k];
+                    q1 += r1[k] * weights[k];
+                }
+                acc[0] += q0 * partial_eq;
+                e_out[j * 6] = q0;
+                e_out[j * 6 + 1] = q1;
+                e_idx = 2;
+                for k in 0..n_cols {
+                    point[k] += diff[k].double();
+                }
+            } else {
+                // baseline z=0 eval
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                air.eval(&mut folder, extra);
+                acc[0] += folder.accumulator * partial_eq;
+                for k in 0..n_cols {
+                    point[k] += diff[k].double();
+                }
+            }
+            // z = 2..=5 evals (4 of them)
+            for z in 0..4 {
+                if z > 0 {
+                    for k in 0..n_cols {
+                        point[k] += diff[k];
+                    }
+                }
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                air.eval(&mut folder, extra);
+                let v = folder.accumulator;
+                acc[1 + z] += v * partial_eq;
+                if candidate {
+                    e_out[j * 6 + e_idx] = v;
+                    e_idx += 1;
+                }
+            }
+        }
+        acc.into_iter().sum()
+    }
+
+    #[test]
+    #[ignore]
+    fn u0a2_execution_efp_rung() {
+        const N_PAIRS: usize = 4096;
+        const PASSES: usize = 8;
+        let air = ExecutionTable::<true>;
+        let n_flat = air.n_columns();
+        let n_cols = n_flat + air.n_shift_columns();
+        let n_constraints = air.n_constraints();
+        let mut rng = Lcg(0xBEEF_CAFE_0BAD_F00D);
+        let cols: Vec<Vec<EFP>> = (0..n_cols)
+            .map(|_| (0..2 * N_PAIRS).map(|_| rng.next_efp()).collect())
+            .collect();
+        let extra = build_extra(n_constraints);
+        let partial_eq = EFP::from(EF::from_usize(987_654_323));
+        let e_prev: Vec<EFP> = (0..2 * N_PAIRS * 6).map(|_| rng.next_efp()).collect();
+        let mut e_out: Vec<EFP> = vec![EFP::ZERO; N_PAIRS * 6];
+        let weights: [EF; 6] = std::array::from_fn(|i| EF::from_usize(31 * i + 17) * EF::from_usize(7_777_777));
+
+        let mut sink = EFP::ZERO;
+        let t_base = median_time(3, 5, || {
+            for _ in 0..PASSES {
+                sink += black_box(drive_exec_efp(
+                    &cols, n_flat, &extra, partial_eq, N_PAIRS, false, &e_prev, &mut e_out, &weights, &air,
+                ));
+            }
+        });
+        let t_cand = median_time(3, 5, || {
+            for _ in 0..PASSES {
+                sink += black_box(drive_exec_efp(
+                    &cols, n_flat, &extra, partial_eq, N_PAIRS, true, &e_prev, &mut e_out, &weights, &air,
+                ));
+            }
+        });
+        black_box(sink);
+        let per = 1e9 / (PASSES * N_PAIRS) as f64;
+        let delta = 100.0 * (t_base - t_cand) / t_base;
+        let verdict = if t_cand <= 0.97 * t_base { "PASS (exec enabled)" } else { "SKIP exec (Qbar poseidon-only)" };
+        println!(
+            "U0A2: baseline {:.0} ns/pair, candidate {:.0} ns/pair, delta {:+.1}% => {verdict}",
+            t_base * per,
+            t_cand * per,
+            -delta
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn u0b_fused_fold_eval_rung() {
+        // Unfolded EFP columns of length 4*Q; round folds bit b' (plan §2.4 map):
+        // base = (j_hi << (b'+2)) | j_lo; m0..m3 at base, |s', |2s', |3s';
+        // f0 = m0 + r(m2-m0) -> i0' = (j_hi << (b'+1)) | j_lo; f1 = m1 + r(m3-m1) -> i0'|s'.
+        const Q: usize = 4096; // folded pair count
+        const BP: usize = 3; // b'
+        const PASSES: usize = 4;
+        let n_flat = N_FLAT_BASELINE_U0;
+        let len = 4 * Q;
+        let mut rng = Lcg(0x1357_9BDF_2468_ACE0);
+        let cols: Vec<Vec<EFP>> = (0..n_flat).map(|_| (0..len).map(|_| rng.next_efp()).collect()).collect();
+        let extra = build_extra(128);
+        let partial_eq = EFP::from(EF::from_usize(192_837_465));
+        let air = Poseidon16Precompile::<true>;
+        let r = EF::from_usize(1_111_111_117);
+        let rp = EFP::from(r);
+
+        let s = 1usize << BP;
+        let lo_mask = s - 1;
+        let fold_one = |c: &Vec<EFP>, out: &mut Vec<EFP>| {
+            out.clear();
+            out.resize(len / 2, EFP::ZERO);
+            for j in 0..len / 2 {
+                let j_hi = j >> (BP + 1);
+                let j_lo = j & ((1 << (BP + 1)) - 1);
+                // production fold_at_bit shape: pairs (i, i|stride) at the fold bit
+                let base = (j_hi << (BP + 2)) | j_lo;
+                out[j] = c[base] + rp * (c[base | (2 * s)] - c[base]);
+            }
+        };
+
+        let mut sink = EFP::ZERO;
+        // Arm A: separate fold pass (all columns) + eval pass over folded pairs
+        let mut folded: Vec<Vec<EFP>> = vec![Vec::new(); n_flat];
+        let t_base = median_time(2, 3, || {
+            for _ in 0..PASSES {
+                for (c, fc) in cols.iter().zip(folded.iter_mut()) {
+                    fold_one(c, fc);
+                }
+                sink += black_box(drive_poseidon_efp(&folded, &extra, partial_eq, Q, 0, None, &air));
+            }
+        });
+        // Arm B: fused — 4-index reads, fold both halves, eval on (f0, f1-f0)
+        let t_cand = median_time(2, 3, || {
+            for _ in 0..PASSES {
+                let mut acc = vec![EFP::ZERO; 10];
+                let mut f0v: Vec<EFP> = Vec::with_capacity(n_flat);
+                let mut diff: Vec<EFP> = Vec::with_capacity(n_flat);
+                let mut state_a: Vec<EFP> = Vec::new();
+                let mut state_b: Vec<EFP> = Vec::new();
+                let mut cached_buf: Vec<EFP> = Vec::new();
+                let mut low_evals = [EFP::ZERO; 4];
+                let mut fold_out: Vec<Vec<EFP>> = (0..n_flat).map(|_| vec![EFP::ZERO; len / 2]).collect();
+                let lagrange: [[F; 4]; 6] =
+                    std::array::from_fn(|t| std::array::from_fn(|i| F::from_usize(3 + 5 * t + 7 * i)));
+                for j in 0..Q {
+                    let j_hi = j >> BP;
+                    let j_lo = j & lo_mask;
+                    let base = (j_hi << (BP + 2)) | j_lo;
+                    let i0p = (j_hi << (BP + 1)) | j_lo;
+                    f0v.clear();
+                    diff.clear();
+                    for (k, c) in cols.iter().enumerate() {
+                        let m0 = c[base];
+                        let m1 = c[base | s];
+                        let m2 = c[base | (2 * s)];
+                        let m3 = c[base | (3 * s)];
+                        let f0 = m0 + rp * (m2 - m0);
+                        let f1 = m1 + rp * (m3 - m1);
+                        fold_out[k][i0p] = f0;
+                        fold_out[k][i0p | s] = f1;
+                        f0v.push(f0);
+                        diff.push(f1 - f0);
+                    }
+                    // inline baseline z-loop on (f0, diff)
+                    let point = &mut f0v;
+                    {
+                        let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], &extra);
+                        folder.cached_state = Some(std::mem::take(&mut state_a));
+                        air.eval(&mut folder, &extra);
+                        acc[0] += folder.accumulator * partial_eq;
+                        low_evals[0] = folder.accumulator_low;
+                        state_a = folder.cached_state.unwrap();
+                    }
+                    for k in 0..n_flat {
+                        point[k] += diff[k].double();
+                    }
+                    {
+                        let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], &extra);
+                        folder.cached_state = Some(std::mem::take(&mut state_b));
+                        air.eval(&mut folder, &extra);
+                        acc[1] += folder.accumulator * partial_eq;
+                        low_evals[1] = folder.accumulator_low;
+                        state_b = folder.cached_state.unwrap();
+                    }
+                    for z_idx in 2..4 {
+                        for k in 0..n_flat {
+                            point[k] += diff[k];
+                        }
+                        let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], &extra);
+                        air.eval(&mut folder, &extra);
+                        acc[z_idx] += folder.accumulator * partial_eq;
+                        low_evals[z_idx] = folder.accumulator_low;
+                    }
+                    for t in 0..6 {
+                        for k in 0..n_flat {
+                            point[k] += diff[k];
+                        }
+                        cached_buf.clear();
+                        for i in 0..state_a.len() {
+                            cached_buf.push(
+                                state_a[i]
+                                    + (state_b[i] - state_a[i]) * PFPacking::<EF>::from(F::from_usize(5 + t).halve()),
+                            );
+                        }
+                        let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], &extra);
+                        folder.skip_low = true;
+                        folder.cached_state = Some(std::mem::take(&mut cached_buf));
+                        folder.low_ci_count = PARTIAL_ROUNDS;
+                        air.eval(&mut folder, &extra);
+                        cached_buf = folder.cached_state.unwrap();
+                        let mut low_interpolated = EFP::ZERO;
+                        for (i, lc) in lagrange[t].iter().enumerate() {
+                            low_interpolated += low_evals[i] * PFPacking::<EF>::from(*lc);
+                        }
+                        acc[4 + t] += (folder.accumulator + low_interpolated) * partial_eq;
+                    }
+                }
+                sink += black_box(acc.into_iter().sum::<EFP>() + fold_out[0][0]);
+            }
+        });
+        black_box(sink);
+        let delta = 100.0 * (t_base - t_cand) / t_base;
+        let verdict = if t_cand <= 0.97 * t_base { "PASS" } else { "KILL fusion" };
+        println!(
+            "U0B: separate {:.1} ms, fused {:.1} ms, delta {:+.1}% (gate <= 0.97x) => {verdict}",
+            t_base * 1e3 / PASSES as f64,
+            t_cand * 1e3 / PASSES as f64,
+            -delta
+        );
+    }
+}
