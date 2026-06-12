@@ -221,7 +221,8 @@ where
     }
 
     fn compute_bare_round_poly(&mut self) -> DensePolynomial<EF> {
-        let split_eq = SplitEq::new(&self.permuted_alphas(self.initial_n_vars - self.rounds_done - 1));
+        let split_eq = info_span!("split_eq_new")
+            .in_scope(|| SplitEq::new(&self.permuted_alphas(self.initial_n_vars - self.rounds_done - 1)));
         let active_count_pairs = self.active_count_pairs();
         let storage_shift = if self.in_phase_1() {
             packing_log_width::<EF>()
@@ -443,6 +444,7 @@ pub fn prove_batched_air_sumcheck<'a, EF: ExtensionField<PF<EF>>>(
     let mut k: Vec<EF> = vec![EF::ONE; sessions.len()];
 
     for round in 0..n_rounds {
+        let round_span = info_span!("air_round", round).entered();
         let mut combined_coeffs = EF::zero_vec(max_full_degree + 1);
         let mut bare_polys: Vec<Option<DensePolynomial<EF>>> = vec![None; sessions.len()];
 
@@ -451,7 +453,7 @@ pub fn prove_batched_air_sumcheck<'a, EF: ExtensionField<PF<EF>>>(
             if round < join_round {
                 combined_coeffs[1] += k[idx] * session.sum();
             } else {
-                let bare_poly = session.compute_bare_round_poly();
+                let bare_poly = info_span!("air_poly", session = idx).in_scope(|| session.compute_bare_round_poly());
                 let full_coeffs = expand_bare_to_full(&bare_poly.coeffs, session.eq_alpha());
                 for (i, &c) in full_coeffs.iter().enumerate() {
                     combined_coeffs[i] += k[idx] * c;
@@ -469,9 +471,10 @@ pub fn prove_batched_air_sumcheck<'a, EF: ExtensionField<PF<EF>>>(
             if round < join_round {
                 k[idx] *= challenge;
             } else if let Some(bare_poly) = &bare_polys[idx] {
-                session.process_challenge(challenge, bare_poly);
+                info_span!("air_fold", session = idx).in_scope(|| session.process_challenge(challenge, bare_poly));
             }
         }
+        drop(round_span);
     }
 
     MultilinearPoint(challenges)
