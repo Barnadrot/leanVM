@@ -46,6 +46,16 @@ pub trait Air: Send + Sync + 'static {
     fn n_shift_columns(&self) -> usize;
 
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData);
+
+    /// h6' T4' (plan §1.3 round-0 seeding, stage 2): emit ONLY the bus
+    /// constraints (indices 0 and 1 — every table's `eval` invokes the bus
+    /// first). On valid trace rows all genuine gates vanish, so the bus-only
+    /// accumulator equals the full one at a fraction of the cost; the C2 seed
+    /// round uses this for its z=0 / z=1 per-row values. Default = full eval
+    /// (bit-identical, just slower) so non-overriding AIRs stay correct.
+    fn eval_bus_only<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
+        self.eval(builder, extra_data);
+    }
 }
 
 pub trait AirBuilder: Sized {

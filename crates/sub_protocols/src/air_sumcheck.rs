@@ -325,7 +325,16 @@ where
                 let MleGroupRef::BasePacked(cols) = self.multilinears.by_ref() else {
                     unreachable!()
                 };
-                let (accs, cache) = c2_pass::<EF, A, PFPacking<EF>, EFPacking<EF>, _, _>(
+                // T4': bus-only evals for the on-row nodes (z=0, z=1). The
+                // default `eval_bus_only` falls back to the full eval, so this
+                // is bit-identical for AIRs without an override.
+                let eval_bus_01 = |a: &A, point: &[PFPacking<EF>], xd: &A::ExtraData| -> EFPacking<EF> {
+                    let n_cols = a.n_columns();
+                    let mut folder = ConstraintFolderPacked::new(&point[..n_cols], &point[n_cols..], xd);
+                    a.eval_bus_only(&mut folder, xd);
+                    folder.accumulator
+                };
+                let (accs, cache) = c2_pass::<EF, A, PFPacking<EF>, EFPacking<EF>, _, _, _>(
                     &cols,
                     |j| split_eq.get_packed(j),
                     &self.computation,
@@ -333,6 +342,7 @@ where
                     fold_bit,
                     active_count_pairs,
                     A::eval_packed_base,
+                    eval_bus_01,
                     None,
                 );
                 let accs = accs.into_iter().map(unpack_sum_packed::<EF>).collect();
@@ -345,13 +355,14 @@ where
                 let Some(C2Store::Packed(table)) = &self.c2_table else {
                     unreachable!()
                 };
-                let (accs, cache) = c2_pass::<EF, A, EFPacking<EF>, EFPacking<EF>, _, _>(
+                let (accs, cache) = c2_pass::<EF, A, EFPacking<EF>, EFPacking<EF>, _, _, _>(
                     &cols,
                     |j| split_eq.get_packed(j),
                     &self.computation,
                     &self.extra_data,
                     fold_bit,
                     active_count_pairs,
+                    A::eval_packed_extension,
                     A::eval_packed_extension,
                     Some(table),
                 );
@@ -365,13 +376,14 @@ where
                 let Some(C2Store::Unpacked(table)) = &self.c2_table else {
                     unreachable!()
                 };
-                let (accs, cache) = c2_pass::<EF, A, EF, EF, _, _>(
+                let (accs, cache) = c2_pass::<EF, A, EF, EF, _, _, _>(
                     &cols,
                     |j| split_eq.get_unpacked(j),
                     &self.computation,
                     &self.extra_data,
                     fold_bit,
                     active_count_pairs,
+                    A::eval_extension,
                     A::eval_extension,
                     Some(table),
                 );
@@ -656,7 +668,7 @@ fn unpack_sum_packed<EF: ExtensionField<PF<EF>>>(s: EFPacking<EF>) -> EF {
 /// exactly once each via the raw-ptr-in-map_reduce precedent
 /// (sc_computation.rs `sumcheck_fold_and_compute_core`).
 #[allow(clippy::too_many_arguments)]
-fn c2_pass<EF, A, IF, EFT, GetEq, EvalFn>(
+fn c2_pass<EF, A, IF, EFT, GetEq, EvalFn, EvalFn01>(
     cols: &[&[IF]],
     get_split_eq: GetEq,
     computation: &A,
@@ -664,6 +676,7 @@ fn c2_pass<EF, A, IF, EFT, GetEq, EvalFn>(
     fold_bit: usize,
     active_count_pairs: usize,
     eval_fn: EvalFn,
+    eval_fn_01: EvalFn01,
     table: Option<&[EFT]>,
 ) -> (Vec<EFT>, Vec<Vec<EFT>>)
 where
@@ -674,6 +687,7 @@ where
     EFT: Copy + Send + Sync + Add<Output = EFT> + AddAssign + Mul<Output = EFT> + PrimeCharacteristicRing,
     GetEq: Fn(usize) -> EFT + Sync + Send,
     EvalFn: Fn(&A, &[IF], &A::ExtraData) -> EFT + Sync + Send,
+    EvalFn01: Fn(&A, &[IF], &A::ExtraData) -> EFT + Sync + Send,
 {
     let degree = computation.degree_z();
     let n_cols = cols.len();
@@ -713,13 +727,16 @@ where
             match table {
                 None => {
                     // Seed: z = 0 (acc + cache), z = 1 (cache only), z = 2.. (acc + cache).
-                    let v0 = eval_fn(computation, point, extra_data);
+                    // z=0 / z=1 are evaluations on actual storage rows -> the
+                    // bus-only fast path applies (T4'); z = 2.. are off-row
+                    // points where genuine gates do NOT vanish -> full eval.
+                    let v0 = eval_fn_01(computation, point, extra_data);
                     write_cache(0, v0);
                     acc[0] += v0 * partial_eq;
                     for k in 0..n_cols {
                         point[k] += diff[k];
                     }
-                    let v1 = eval_fn(computation, point, extra_data);
+                    let v1 = eval_fn_01(computation, point, extra_data);
                     write_cache(1, v1);
                     for (zi, acc_z) in acc[1..].iter_mut().enumerate() {
                         for k in 0..n_cols {

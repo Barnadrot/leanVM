@@ -445,6 +445,43 @@ impl<const BUS: bool> Air for Poseidon8Precompile<BUS> {
     fn n_constraints(&self) -> usize {
         poseidon8_n_constraints(BUS)
     }
+    // h6' T4': bus-only row value for the C2 seed round. Reads the handful of
+    // committed columns the bus tuple needs and emits exactly the two bus
+    // constraints (alpha indices 0, 1). On witness-consistent rows (including
+    // padding copies of the last row) this equals the full `eval` accumulator
+    // — pinned per-row by tests/c2_bus_seed.rs and by the proof byte-diff.
+    fn eval_bus_only<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
+        if !BUS {
+            self.eval(builder, extra_data);
+            return;
+        }
+        let flat = builder.flat();
+        let multiplicity = flat[POSEIDON_8_COL_MULTIPLICITY];
+        let nu_b = flat[POSEIDON_8_COL_NU_B];
+        let nu_c = flat[POSEIDON_8_COL_NU_C];
+        let flag_out4 = flat[POSEIDON_8_COL_FLAG_OUT4];
+        let flag_left = flat[POSEIDON_8_COL_FLAG_LEFT];
+        let flag_permute = flat[POSEIDON_8_COL_FLAG_PERMUTE];
+        let offset_left = flat[POSEIDON_8_COL_OFFSET_LEFT];
+        let addr_left_hi = flat[POSEIDON_8_COL_ADDR_LEFT_HI];
+
+        let domainsep_reconstructed = AB::IF::from_usize(POSEIDON_DOMAINSEP_BASE)
+            + flag_permute * AB::F::from_usize(POSEIDON_FLAG_PERMUTE_SHIFT)
+            + flag_out4 * AB::F::from_usize(POSEIDON_FLAG_OUT4_SHIFT)
+            + flag_left * AB::F::from_usize(POSEIDON_FLAG_LEFT_SHIFT)
+            + flag_left * offset_left * AB::F::from_usize(POSEIDON_OFFSET_LEFT_SHIFT);
+        let one_minus_flag_left = AB::IF::ONE - flag_left;
+        let nu_a = addr_left_hi - one_minus_flag_left * AB::F::from_usize(HALF_DIGEST_LEN);
+
+        eval_bus_virtual::<AB, EF>(
+            builder,
+            extra_data,
+            multiplicity,
+            domainsep_reconstructed,
+            &[nu_a, nu_b, nu_c],
+        );
+    }
+
     fn eval<AB: AirBuilder>(&self, builder: &mut AB, extra_data: &Self::ExtraData) {
         let c = get_partial_constants();
 
