@@ -427,6 +427,18 @@ impl<const BUS: bool> Air for Poseidon8Precompile<BUS> {
         // gates are at most degree 2; the round gates dominate at degree 7.
         8
     }
+    fn degree_z(&self) -> usize {
+        // Degree census (h6' plan §1.2; empirically validated: the bare
+        // round-poly coefficient at index 8 is [0,0,0] in EVERY round):
+        // full-round gates `post − Σ MDS·(state+rc)^7` and partial-round gates
+        // `post_sbox − x^7` are degree 7 (state / x are LINEAR in committed
+        // columns — the sparse decomposition commits post_sbox precisely to
+        // reset degree); all other constraints are degree ≤ 3, bus gates ≤ 2.
+        // 0 of 106 constraints reach the declared degree 8, so the z=8 eval
+        // pass is provably redundant. `degree_air()` stays 8 (wire format and
+        // verifier-side message sizing unchanged).
+        7
+    }
     fn n_shift_columns(&self) -> usize {
         0
     }

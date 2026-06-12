@@ -386,7 +386,10 @@ where
     GetEq: Fn(usize) -> EFT + Sync + Send,
     UnpackSum: Fn(EFT) -> EF + Sync + Send,
 {
-    let degree = computation.degree();
+    // Fresh-eval count per pair: sized by the TRUE constraint degree (`degree_z`,
+    // see the Air trait doc) — the bare-poly interpolation and the wire format
+    // remain sized by the declared degree.
+    let degree = computation.degree_z();
     let n_cols = cols.len();
     let stride = 1usize << fold_bit;
     let lo_mask = stride - 1;

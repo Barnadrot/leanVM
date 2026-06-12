@@ -14,6 +14,18 @@ pub trait Air: Send + Sync + 'static {
 
     fn degree_air(&self) -> usize;
 
+    /// Maximum univariate degree of the constraint composition along a fold
+    /// line `C(lo + z*diff)` — i.e. the number of fresh evaluation points the
+    /// sumcheck prover needs per pair. Defaults to `degree_air()`. Override
+    /// when the declared `degree_air` over-states the true constraint degree:
+    /// the prover then skips the provably-redundant top eval pass. The wire
+    /// format is UNAFFECTED (messages stay sized by `degree_air`; the
+    /// interpolated coefficients are identical because the omitted top
+    /// coefficient is exactly zero).
+    fn degree_z(&self) -> usize {
+        self.degree_air()
+    }
+
     fn n_columns(&self) -> usize;
 
     fn n_constraints(&self) -> usize;
