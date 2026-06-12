@@ -26,6 +26,16 @@ pub trait Air: Send + Sync + 'static {
         self.degree_air()
     }
 
+    /// Whether the C2 per-pair constraint-value table (h6' T3', Gruen 2024/108
+    /// §4 adapted) pays for itself for this AIR. The table trades one full
+    /// constraint eval per pair (the z=0 node) for one table lookup plus a
+    /// challenge-time extrapolation; it wins when constraint evaluation is
+    /// expensive relative to the bookkeeping. Both strategies are bit-identical
+    /// — this flag only selects the faster one per table.
+    fn c2_table_profitable(&self) -> bool {
+        true
+    }
+
     fn n_columns(&self) -> usize;
 
     fn n_constraints(&self) -> usize;

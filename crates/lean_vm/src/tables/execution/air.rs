@@ -45,6 +45,14 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
     fn degree_air(&self) -> usize {
         5
     }
+    // C2 kill rule, measured iter-3 T3' (3x interleaved A/B, 1550-sig xmss):
+    // exec class poly +1.5ms / fold +5.4ms = +6.9ms net REGRESSION — the cheap
+    // 14-constraint eval (~235 ns/pair EF) does not amortize the table's
+    // challenge-time extrapolation + cache traffic (plan_spec §5.1 thin case).
+    // Poseidon (~3338 ns/pair, 106 constraints) nets -39.7ms and keeps C2.
+    fn c2_table_profitable(&self) -> bool {
+        false
+    }
     fn n_shift_columns(&self) -> usize {
         2
     }
