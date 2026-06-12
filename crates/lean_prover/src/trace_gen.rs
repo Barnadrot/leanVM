@@ -33,22 +33,30 @@ pub fn get_execution_trace(
         let field_repr = &bytecode.instructions_multilinear()[pc * N_INSTRUCTION_COLUMNS.next_power_of_two()..]
             [..N_INSTRUCTION_COLUMNS];
 
-        let flag_a = field_repr[instr_idx(EXEC_COL_FLAG_A)];
-        let flag_b = field_repr[instr_idx(EXEC_COL_FLAG_B)];
-        let flag_c = field_repr[instr_idx(EXEC_COL_FLAG_C)];
-        let flag_c_fp = field_repr[instr_idx(EXEC_COL_FLAG_C_FP)];
-        let flag_ab_fp = field_repr[instr_idx(EXEC_COL_FLAG_AB_FP)];
+        // h9-B: decode the boolean flags from the ternary mode columns
+        // (M = 0 memory, 1 immediate, 2 fp-relative; exact integer compares —
+        // the public bytecode is statically validated to the {0,1,2} domain,
+        // and the decoders below match the AIR's Lagrange decoders on it).
+        let mode_a = field_repr[instr_idx(EXEC_COL_MODE_A)];
+        let mode_b = field_repr[instr_idx(EXEC_COL_MODE_B)];
+        let mode_c = field_repr[instr_idx(EXEC_COL_MODE_C)];
+        let flag_a = F::from_bool(mode_a == F::ONE);
+        let fab_a = F::from_bool(mode_a == F::TWO);
+        let flag_b = F::from_bool(mode_b == F::ONE);
+        let fab_b = F::from_bool(mode_b == F::TWO);
+        let flag_c = F::from_bool(mode_c == F::ONE);
+        let flag_c_fp = F::from_bool(mode_c == F::TWO);
         let aux_1 = field_repr[instr_idx(EXEC_COL_AUX_1)];
         let is_deref = aux_1 == F::TWO;
 
         let mut addr_a = F::ZERO;
-        if flag_a.is_zero() && flag_ab_fp.is_zero() {
+        if mode_a.is_zero() {
             addr_a = F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_A)];
         }
         let value_a = memory.0.get(addr_a.to_usize()).copied().flatten().unwrap_or_default();
 
         let mut addr_b = F::ZERO;
-        if flag_b.is_zero() && flag_ab_fp.is_zero() {
+        if mode_b.is_zero() {
             addr_b = F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_B)];
         } else if is_deref {
             // DEREF: addr_B = value_A + operand_B
@@ -57,7 +65,7 @@ pub fn get_execution_trace(
         let value_b = memory.0.get(addr_b.to_usize()).copied().flatten().unwrap_or_default();
 
         let mut addr_c = F::ZERO;
-        if flag_c.is_zero() && flag_c_fp.is_zero() {
+        if mode_c.is_zero() {
             addr_c = F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_C)];
         }
         let value_c = memory.0.get(addr_c.to_usize()).copied().flatten().unwrap_or_default();
@@ -67,11 +75,11 @@ pub fn get_execution_trace(
         }
 
         let nu_a = flag_a * field_repr[instr_idx(EXEC_COL_OPERAND_A)]
-            + (F::ONE - flag_a - flag_ab_fp) * value_a
-            + flag_ab_fp * (F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_A)]);
+            + (F::ONE - flag_a - fab_a) * value_a
+            + fab_a * (F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_A)]);
         let nu_b = flag_b * field_repr[instr_idx(EXEC_COL_OPERAND_B)]
-            + (F::ONE - flag_b - flag_ab_fp) * value_b
-            + flag_ab_fp * (F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_B)]);
+            + (F::ONE - flag_b - fab_b) * value_b
+            + fab_b * (F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_B)]);
         let nu_c = flag_c * field_repr[instr_idx(EXEC_COL_OPERAND_C)]
             + (F::ONE - flag_c - flag_c_fp) * value_c
             + flag_c_fp * (F::from_usize(fp) + field_repr[instr_idx(EXEC_COL_OPERAND_C)]);

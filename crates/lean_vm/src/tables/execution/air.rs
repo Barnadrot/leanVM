@@ -2,7 +2,7 @@ use crate::{EF, ExecutionTable, ExtraDataForBuses, LOGUP_MEMORY_DOMAINSEP, eval_
 use backend::*;
 
 pub const N_RUNTIME_COLUMNS: usize = 5;
-pub const N_INSTRUCTION_COLUMNS: usize = 12;
+pub const N_INSTRUCTION_COLUMNS: usize = 10;
 pub const N_TOTAL_EXECUTION_COLUMNS: usize = N_INSTRUCTION_COLUMNS + N_RUNTIME_COLUMNS;
 
 // Committed columns (IMPORTANT: they must be the first columns)
@@ -10,6 +10,13 @@ pub const N_TOTAL_EXECUTION_COLUMNS: usize = N_INSTRUCTION_COLUMNS + N_RUNTIME_C
 // polynomials of the columns below (the closed forms trace_gen.rs computes), so they
 // live as temporary columns and the memory-bus claims are proven inside the batched
 // AIR sumcheck (deferred-claim buses, plan_spec §3.A). Committed: 20 → 17 columns.
+// h9-B (iter 5): the five addressing-mode booleans (FLAG_A/B/C, FLAG_C_FP, FLAG_AB_FP)
+// merge into three ternary mode columns M_A/M_B/M_C ∈ {0,1,2} (0 = memory,
+// 1 = immediate/constant, 2 = fp-relative; M_A = 2 ⟺ M_B = 2, the old flag_ab_fp).
+// The boolean flags become degree-2 Lagrange decoders of the mode columns (the
+// aux_1 flag_add/flag_deref precedent). Domain {0,1,2} is enforced for free by the
+// bytecode lookup against the statically-validated public bytecode
+// (Bytecode::validate_modes). Committed: 17 → 15 columns; exec degree_air 5 → 7.
 pub const EXEC_COL_PC: usize = 0;
 pub const EXEC_COL_FP: usize = 1;
 pub const EXEC_COL_VALUE_A: usize = 2;
@@ -20,25 +27,23 @@ pub const EXEC_COL_VALUE_C: usize = 4;
 pub const EXEC_COL_OPERAND_A: usize = 5;
 pub const EXEC_COL_OPERAND_B: usize = 6;
 pub const EXEC_COL_OPERAND_C: usize = 7;
-pub const EXEC_COL_FLAG_A: usize = 8;
-pub const EXEC_COL_FLAG_B: usize = 9;
-pub const EXEC_COL_FLAG_C: usize = 10;
-pub const EXEC_COL_FLAG_C_FP: usize = 11;
-pub const EXEC_COL_FLAG_AB_FP: usize = 12;
-pub const EXEC_COL_FLAG_MUL: usize = 13;
-pub const EXEC_COL_FLAG_JUMP: usize = 14;
-pub const EXEC_COL_AUX_1: usize = 15;
-pub const EXEC_COL_AUX_2: usize = 16;
+pub const EXEC_COL_MODE_A: usize = 8;
+pub const EXEC_COL_MODE_B: usize = 9;
+pub const EXEC_COL_MODE_C: usize = 10;
+pub const EXEC_COL_FLAG_MUL: usize = 11;
+pub const EXEC_COL_FLAG_JUMP: usize = 12;
+pub const EXEC_COL_AUX_1: usize = 13;
+pub const EXEC_COL_AUX_2: usize = 14;
 
 // Temporary columns (stored to avoid duplicate computations; NOT committed)
 pub const N_TEMPORARY_EXEC_COLUMNS: usize = 7;
-pub const EXEC_COL_ADDR_A: usize = 17;
-pub const EXEC_COL_ADDR_B: usize = 18;
-pub const EXEC_COL_ADDR_C: usize = 19;
-pub const EXEC_COL_FLAG_PRECOMPILE: usize = 20;
-pub const EXEC_COL_NU_A: usize = 21;
-pub const EXEC_COL_NU_B: usize = 22;
-pub const EXEC_COL_NU_C: usize = 23;
+pub const EXEC_COL_ADDR_A: usize = 15;
+pub const EXEC_COL_ADDR_B: usize = 16;
+pub const EXEC_COL_ADDR_C: usize = 17;
+pub const EXEC_COL_FLAG_PRECOMPILE: usize = 18;
+pub const EXEC_COL_NU_A: usize = 19;
+pub const EXEC_COL_NU_B: usize = 20;
+pub const EXEC_COL_NU_C: usize = 21;
 
 impl<const BUS: bool> Air for ExecutionTable<BUS> {
     type ExtraData = ExtraDataForBuses<EF>;
@@ -47,7 +52,11 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         N_TOTAL_EXECUTION_COLUMNS
     }
     fn degree_air(&self) -> usize {
-        5
+        // h9-B: mode decoders are quadratic in M_*, so nu_* are degree 3 and the
+        // worst constraints (flag_mul·(nu_b − nu_a·nu_c); the jump family
+        // (flag_jump·nu_a)·(… − nu_*)) reach degree 7. Global max_full_degree
+        // stays 9 (poseidon declares 8) ⇒ sumcheck wire format unchanged.
+        7
     }
     // C2 kill rule, measured iter-3 T3' (3x interleaved A/B, 1550-sig xmss):
     // exec class poly +1.5ms / fold +5.4ms = +6.9ms net REGRESSION — the cheap
@@ -79,9 +88,9 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
             flat[EXEC_COL_OPERAND_B],
             flat[EXEC_COL_OPERAND_C],
         );
-        let (flag_a, flag_b, flag_c) = (flat[EXEC_COL_FLAG_A], flat[EXEC_COL_FLAG_B], flat[EXEC_COL_FLAG_C]);
-        let flag_c_fp = flat[EXEC_COL_FLAG_C_FP];
-        let flag_ab_fp = flat[EXEC_COL_FLAG_AB_FP];
+        let mode_a = flat[EXEC_COL_MODE_A];
+        let mode_b = flat[EXEC_COL_MODE_B];
+        let mode_c = flat[EXEC_COL_MODE_C];
         let flag_mul = flat[EXEC_COL_FLAG_MUL];
         let flag_jump = flat[EXEC_COL_FLAG_JUMP];
         let aux_1 = flat[EXEC_COL_AUX_1];
@@ -91,12 +100,23 @@ impl<const BUS: bool> Air for ExecutionTable<BUS> {
         let pc = flat[EXEC_COL_PC];
         let fp = flat[EXEC_COL_FP];
 
-        let one_minus_flag_a_and_flag_ab_fp = -(flag_a + flag_ab_fp - AB::F::ONE);
-        let one_minus_flag_b_and_flag_ab_fp = -(flag_b + flag_ab_fp - AB::F::ONE);
+        // h9-B Lagrange decoders over {0,1,2} (flag_add/flag_deref precedent):
+        //   flag_x   = 1 iff M = 1:  M(2−M)        = 2M − M²
+        //   fp_x     = 1 iff M = 2:  M(M−1)/2
+        //   mem_x    = 1 iff M = 0:  1 − flag_x − fp_x  (= (M−1)(M−2)/2)
+        let flag_a = mode_a * AB::F::TWO - mode_a * mode_a;
+        let fab_a = (mode_a * (mode_a - AB::F::ONE)).halve();
+        let flag_b = mode_b * AB::F::TWO - mode_b * mode_b;
+        let fab_b = (mode_b * (mode_b - AB::F::ONE)).halve();
+        let flag_c = mode_c * AB::F::TWO - mode_c * mode_c;
+        let flag_c_fp = (mode_c * (mode_c - AB::F::ONE)).halve();
+
+        let one_minus_flag_a_and_flag_ab_fp = -(flag_a + fab_a - AB::F::ONE);
+        let one_minus_flag_b_and_flag_ab_fp = -(flag_b + fab_b - AB::F::ONE);
         let one_minus_flag_c_and_flag_c_fp = -(flag_c + flag_c_fp - AB::F::ONE);
 
-        let nu_a = flag_a * operand_a + one_minus_flag_a_and_flag_ab_fp * value_a + flag_ab_fp * (fp + operand_a);
-        let nu_b = flag_b * operand_b + one_minus_flag_b_and_flag_ab_fp * value_b + flag_ab_fp * (fp + operand_b);
+        let nu_a = flag_a * operand_a + one_minus_flag_a_and_flag_ab_fp * value_a + fab_a * (fp + operand_a);
+        let nu_b = flag_b * operand_b + one_minus_flag_b_and_flag_ab_fp * value_b + fab_b * (fp + operand_b);
         let nu_c = flag_c * operand_c + one_minus_flag_c_and_flag_c_fp * value_c + flag_c_fp * (fp + operand_c);
 
         let fp_plus_operand_a = fp + operand_a;
