@@ -43,14 +43,13 @@ pub fn run_product_sumcheck<EF: ExtensionField<PF<EF>>>(
     pow_bits: usize,
 ) -> (MultilinearPoint<EF>, EF, MleOwned<EF>, MleOwned<EF>) {
     assert!(n_rounds >= 1);
-    let first_sumcheck_poly = match (pol_a, pol_b) {
-        (MleRef::BasePacked(evals), MleRef::ExtensionPacked(weights)) => {
-            if EF::DIMENSION == 3 {
-                compute_product_sumcheck_polynomial_base_ext_packed::<3, _, _, _, EF>(evals, weights, sum)
-            } else {
-                unimplemented!()
-            }
+    if let (MleRef::BasePacked(evals), MleRef::ExtensionPacked(weights)) = (pol_a, pol_b) {
+        if EF::DIMENSION == 3 {
+            return run_product_sumcheck_base_eager::<3, EF>(evals, weights, prover_state, sum, n_rounds, pow_bits);
         }
+        unimplemented!()
+    }
+    let first_sumcheck_poly = match (pol_a, pol_b) {
         (MleRef::ExtensionPacked(evals), MleRef::ExtensionPacked(weights)) => {
             compute_product_sumcheck_polynomial(evals, weights, sum, |e| EFPacking::<EF>::to_ext_iter([e]).collect())
         }
@@ -73,13 +72,6 @@ pub fn run_product_sumcheck<EF: ExtensionField<PF<EF>>>(
     }
 
     let (second_sumcheck_poly, folded) = match (pol_a, pol_b) {
-        (MleRef::BasePacked(evals), MleRef::ExtensionPacked(weights)) => {
-            let (second_sumcheck_poly, folded) =
-                fold_and_compute_product_sumcheck_polynomial(evals, weights, r1, sum, |e| {
-                    EFPacking::<EF>::to_ext_iter([e]).collect()
-                });
-            (second_sumcheck_poly, MleGroupOwned::ExtensionPacked(folded))
-        }
         (MleRef::ExtensionPacked(evals), MleRef::ExtensionPacked(weights)) => {
             let (second_sumcheck_poly, folded) =
                 fold_and_compute_product_sumcheck_polynomial(evals, weights, r1, sum, |e| {
@@ -98,6 +90,68 @@ pub fn run_product_sumcheck<EF: ExtensionField<PF<EF>>>(
             (second_sumcheck_poly, MleGroupOwned::Extension(folded))
         }
         _ => unimplemented!(),
+    };
+
+    prover_state.add_sumcheck_polynomial(&second_sumcheck_poly.coeffs, None);
+    prover_state.pow_grinding(pow_bits);
+    let r2: EF = prover_state.sample();
+    sum = second_sumcheck_poly.evaluate(r2);
+
+    let (mut challenges, folds, sum) = sumcheck_prove_many_rounds(
+        folded,
+        Some(r2),
+        &ProductComputation {},
+        &vec![],
+        None,
+        prover_state,
+        sum,
+        None,
+        n_rounds - 2,
+        false,
+        pow_bits,
+    );
+
+    challenges.splice(0..0, [r1, r2]);
+    let [pol_a, pol_b] = folds.split().try_into().unwrap();
+    (challenges, sum, pol_a, pol_b)
+}
+
+/// Eager path for the (BasePacked, ExtensionPacked) arm, extracted verbatim from
+/// `run_product_sumcheck`. Kept as the equality oracle for the lazy path and as
+/// the fallback for small instances. Generic over `DIM` so the full path is
+/// exercisable by the KoalaBear (DIM = 5) test harness.
+pub fn run_product_sumcheck_base_eager<const DIM: usize, EF: ExtensionField<PF<EF>>>(
+    evals: &[PFPacking<EF>],
+    weights: &[EFPacking<EF>],
+    prover_state: &mut impl FSProver<EF>,
+    mut sum: EF,
+    n_rounds: usize,
+    pow_bits: usize,
+) -> (MultilinearPoint<EF>, EF, MleOwned<EF>, MleOwned<EF>) {
+    assert!(n_rounds >= 1);
+    let first_sumcheck_poly =
+        compute_product_sumcheck_polynomial_base_ext_packed::<DIM, _, _, _, EF>(evals, weights, sum);
+
+    prover_state.add_sumcheck_polynomial(&first_sumcheck_poly.coeffs, None);
+    prover_state.pow_grinding(pow_bits);
+    let r1: EF = prover_state.sample();
+    sum = first_sumcheck_poly.evaluate(r1);
+
+    if n_rounds == 1 {
+        return (
+            MultilinearPoint(vec![r1]),
+            sum,
+            MleRef::<EF>::BasePacked(evals).fold(r1),
+            MleRef::<EF>::ExtensionPacked(weights).fold(r1),
+        );
+    }
+
+    let (second_sumcheck_poly, folded) = {
+        let (second_sumcheck_poly, folded) =
+            fold_and_compute_product_sumcheck_polynomial(evals, weights, r1, sum, |e| {
+                EFPacking::<EF>::to_ext_iter([e]).collect()
+            });
+        (second_sumcheck_poly, MleGroupOwned::ExtensionPacked(folded))
     };
 
     prover_state.add_sumcheck_polynomial(&second_sumcheck_poly.coeffs, None);
@@ -477,5 +531,161 @@ mod base_ext_packed_kernel_tests {
         );
         let reference = reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
         assert_eq!(new.coeffs, reference.coeffs);
+    }
+}
+
+#[cfg(test)]
+mod full_path_equality_tests {
+    use super::*;
+    use koala_bear::{KoalaBear, PackedQuinticExtensionFieldKB, QuinticExtensionFieldKB};
+
+    type EFKb = QuinticExtensionFieldKB;
+    type PFKb = <KoalaBear as Field>::Packing;
+    const DIM_KB: usize = 5;
+
+    struct XorShift(u64);
+    impl XorShift {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Deterministic recording Fiat-Shamir prover: challenges come from a seeded
+    /// xorshift stream (independent of absorbed data), and every coefficient
+    /// vector passed to `add_sumcheck_polynomial` is captured. Two runs with the
+    /// same seed and the same number of sample() calls see identical challenge
+    /// sequences, so any divergence between the eager and lazy paths surfaces as
+    /// a recorded-coefficient or returned-value mismatch.
+    pub(super) struct RecordingFs {
+        rng: XorShift,
+        pub polys: Vec<Vec<EFKb>>,
+        pub challenges: Vec<EFKb>,
+    }
+
+    impl RecordingFs {
+        pub fn new(seed: u64) -> Self {
+            Self {
+                rng: XorShift(seed | 1),
+                polys: vec![],
+                challenges: vec![],
+            }
+        }
+    }
+
+    impl ChallengeSampler<EFKb> for RecordingFs {
+        fn sample_vec(&mut self, len: usize) -> Vec<EFKb> {
+            (0..len)
+                .map(|_| {
+                    let c = EFKb::from_basis_coefficients_fn(|_| KoaBearRand::draw(&mut self.rng));
+                    self.challenges.push(c);
+                    c
+                })
+                .collect()
+        }
+        fn sample_in_range(&mut self, _bits: usize, _n_samples: usize) -> Vec<usize> {
+            unimplemented!("not used by run_product_sumcheck")
+        }
+    }
+
+    /// Helper so the closure in sample_vec stays readable.
+    struct KoaBearRand;
+    impl KoaBearRand {
+        fn draw(rng: &mut XorShift) -> KoalaBear {
+            KoalaBear::from_u64(rng.next_u64())
+        }
+    }
+
+    impl FSProver<EFKb> for RecordingFs {
+        fn state(&self) -> String {
+            format!("recording[{}]", self.polys.len())
+        }
+        fn add_base_scalars(&mut self, _scalars: &[KoalaBear]) {}
+        fn observe_scalars(&mut self, _scalars: &[KoalaBear]) {}
+        fn duplex(&mut self) {}
+        fn pow_grinding(&mut self, _bits: usize) {}
+        fn hint_merkle_paths_base(&mut self, _paths: Vec<MerklePath<KoalaBear, KoalaBear>>) {}
+        fn add_sumcheck_polynomial(&mut self, coeffs: &[EFKb], _eq_alpha: Option<EFKb>) {
+            self.polys.push(coeffs.to_vec());
+        }
+    }
+
+    pub(super) fn random_full_inputs(seed: u64, n_vars: usize) -> (Vec<PFKb>, Vec<PackedQuinticExtensionFieldKB>) {
+        let mut rng = XorShift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let n_packed = (1usize << n_vars) / PFKb::WIDTH;
+        let base: Vec<PFKb> = (0..n_packed)
+            .map(|_| PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64())))
+            .collect();
+        let ext: Vec<PackedQuinticExtensionFieldKB> = (0..n_packed)
+            .map(|_| {
+                PackedQuinticExtensionFieldKB::from_basis_coefficients_fn(|_| {
+                    PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64()))
+                })
+            })
+            .collect();
+        (base, ext)
+    }
+
+    pub(super) fn true_sum(base: &[PFKb], ext: &[PackedQuinticExtensionFieldKB]) -> EFKb {
+        let mut acc = PackedQuinticExtensionFieldKB::ZERO;
+        for (b, e) in base.iter().zip(ext.iter()) {
+            acc += *e * *b;
+        }
+        <PackedQuinticExtensionFieldKB as PackedFieldExtension<KoalaBear, EFKb>>::to_ext_iter([acc]).sum::<EFKb>()
+    }
+
+    pub(super) fn mle_owned_to_ext_vec(m: &MleOwned<EFKb>) -> Vec<EFKb> {
+        match m {
+            MleOwned::Base(v) => v.iter().map(|&x| EFKb::from(x)).collect(),
+            MleOwned::Extension(v) => v.to_vec(),
+            MleOwned::BasePacked(v) => v.iter().flat_map(|p| p.as_slice().to_vec()).map(EFKb::from).collect(),
+            MleOwned::ExtensionPacked(v) => {
+                <PackedQuinticExtensionFieldKB as PackedFieldExtension<KoalaBear, EFKb>>::to_ext_iter(v.iter().copied())
+                    .collect()
+            }
+        }
+    }
+
+    /// Harness self-check: the eager full path is deterministic under the
+    /// recording FS prover (same seed -> identical transcript and outputs).
+    #[test]
+    fn eager_full_path_deterministic_under_mock() {
+        for (seed, n_vars, n_rounds) in [(1u64, 8usize, 2usize), (2, 10, 3), (3, 12, 6)] {
+            let (base, ext) = random_full_inputs(seed, n_vars);
+            let sum = true_sum(&base, &ext);
+
+            let mut fs_a = RecordingFs::new(seed);
+            let out_a = run_product_sumcheck_base_eager::<DIM_KB, EFKb>(&base, &ext, &mut fs_a, sum, n_rounds, 0);
+            let mut fs_b = RecordingFs::new(seed);
+            let out_b = run_product_sumcheck_base_eager::<DIM_KB, EFKb>(&base, &ext, &mut fs_b, sum, n_rounds, 0);
+
+            assert_eq!(fs_a.polys, fs_b.polys, "seed={seed}");
+            assert_eq!(fs_a.challenges, fs_b.challenges, "seed={seed}");
+            assert_eq!(out_a.0.0, out_b.0.0, "challenge points seed={seed}");
+            assert_eq!(out_a.1, out_b.1, "final sum seed={seed}");
+            assert_eq!(mle_owned_to_ext_vec(&out_a.2), mle_owned_to_ext_vec(&out_b.2));
+            assert_eq!(mle_owned_to_ext_vec(&out_a.3), mle_owned_to_ext_vec(&out_b.3));
+        }
+    }
+
+    /// Sanity: the eager path's final claim is consistent — the returned folds
+    /// evaluated as a product reproduce the final sum.
+    #[test]
+    fn eager_full_path_final_claim_consistent() {
+        for (seed, n_vars, n_rounds) in [(7u64, 9usize, 2usize), (8, 11, 4)] {
+            let (base, ext) = random_full_inputs(seed, n_vars);
+            let sum = true_sum(&base, &ext);
+            let mut fs = RecordingFs::new(seed);
+            let (_point, final_sum, pol_a, pol_b) =
+                run_product_sumcheck_base_eager::<DIM_KB, EFKb>(&base, &ext, &mut fs, sum, n_rounds, 0);
+            let a = mle_owned_to_ext_vec(&pol_a);
+            let b = mle_owned_to_ext_vec(&pol_b);
+            let recomposed: EFKb = a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+            assert_eq!(recomposed, final_sum, "seed={seed} n_vars={n_vars} n_rounds={n_rounds}");
+        }
     }
 }
