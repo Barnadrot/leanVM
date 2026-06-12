@@ -439,15 +439,10 @@ mod base_ext_packed_kernel_tests {
         for (seed, log_n) in [(1u64, 1usize), (2, 2), (3, 4), (4, 7), (5, 11), (6, 12)] {
             let (base, ext) = random_inputs(seed, log_n);
             let sum = QuinticExtensionFieldKB::from_basis_coefficients_fn(|j| KoalaBear::from_u64(seed + j as u64));
-            let new = compute_product_sumcheck_polynomial_base_ext_packed::<
-                DIM_KB,
-                _,
-                _,
-                _,
-                QuinticExtensionFieldKB,
-            >(&base, &ext, sum);
-            let reference =
-                reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
+            let new = compute_product_sumcheck_polynomial_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(
+                &base, &ext, sum,
+            );
+            let reference = reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
             assert_eq!(new.coeffs, reference.coeffs, "seed={seed} log_n={log_n}");
         }
     }
@@ -477,13 +472,9 @@ mod base_ext_packed_kernel_tests {
             })
             .collect();
         let sum = QuinticExtensionFieldKB::ONE;
-        let new = compute_product_sumcheck_polynomial_base_ext_packed::<
-            DIM_KB,
-            _,
-            _,
-            _,
-            QuinticExtensionFieldKB,
-        >(&base, &ext, sum);
+        let new = compute_product_sumcheck_polynomial_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(
+            &base, &ext, sum,
+        );
         let reference = reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
         assert_eq!(new.coeffs, reference.coeffs);
     }

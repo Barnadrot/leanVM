@@ -155,12 +155,7 @@ impl PrimeCharacteristicRing for PackedGoldilocksAVX512 {
     #[inline]
     fn unreduced_mul(a: Self, b: Self) -> [Self; 4] {
         let (hi, lo) = mul64_64(a.to_vector(), b.to_vector());
-        [
-            Self::from_vector(lo),
-            Self::from_vector(hi),
-            Self::ZERO,
-            Self::ZERO,
-        ]
+        [Self::from_vector(lo), Self::from_vector(hi), Self::ZERO, Self::ZERO]
     }
 
     #[inline]
@@ -205,7 +200,15 @@ impl PrimeCharacteristicRing for PackedGoldilocksAVX512 {
             let t_hi = t[1].to_vector();
             let nt_lo = _mm512_ternarylogic_epi64::<0x55>(t_lo, t_lo, t_lo);
             let nt_hi = _mm512_ternarylogic_epi64::<0x55>(t_hi, t_hi, t_hi);
-            Self::lazy_acc_add(acc, [Self::from_vector(nt_lo), Self::from_vector(nt_hi), Self::ZERO, Self::ZERO])
+            Self::lazy_acc_add(
+                acc,
+                [
+                    Self::from_vector(nt_lo),
+                    Self::from_vector(nt_hi),
+                    Self::ZERO,
+                    Self::ZERO,
+                ],
+            )
         }
     }
 

@@ -315,12 +315,7 @@ impl PrimeCharacteristicRing for Goldilocks {
     fn lazy_acc_zero() -> [Self; 4] {
         // OFFSET192 = P << 126 = (P >> 2) * 2^128 + (P & 0b11 = 1) * 2^126:
         //   l0 = 0, l1 = 1 << 62, l2 = P >> 2.
-        [
-            Self::ZERO,
-            Self::new(1u64 << 62),
-            Self::new(P >> 2),
-            Self::ZERO,
-        ]
+        [Self::ZERO, Self::new(1u64 << 62), Self::new(P >> 2), Self::ZERO]
     }
 
     #[inline]
@@ -328,10 +323,7 @@ impl PrimeCharacteristicRing for Goldilocks {
         let (l0, c0) = acc[0].value.overflowing_add(t[0].value);
         let (l1a, c1a) = acc[1].value.overflowing_add(t[1].value);
         let (l1, c1b) = l1a.overflowing_add(c0 as u64);
-        let l2 = acc[2]
-            .value
-            .wrapping_add(c1a as u64)
-            .wrapping_add(c1b as u64);
+        let l2 = acc[2].value.wrapping_add(c1a as u64).wrapping_add(c1b as u64);
         [Self::new(l0), Self::new(l1), Self::new(l2), Self::ZERO]
     }
 
@@ -340,10 +332,7 @@ impl PrimeCharacteristicRing for Goldilocks {
         let (l0, b0) = acc[0].value.overflowing_sub(t[0].value);
         let (l1a, b1a) = acc[1].value.overflowing_sub(t[1].value);
         let (l1, b1b) = l1a.overflowing_sub(b0 as u64);
-        let l2 = acc[2]
-            .value
-            .wrapping_sub(b1a as u64)
-            .wrapping_sub(b1b as u64);
+        let l2 = acc[2].value.wrapping_sub(b1a as u64).wrapping_sub(b1b as u64);
         [Self::new(l0), Self::new(l1), Self::new(l2), Self::ZERO]
     }
 
@@ -361,8 +350,7 @@ impl PrimeCharacteristicRing for Goldilocks {
         // to keep the u128 arithmetic borrow-free, then one reduce128:
         // r < 2^64 + 2^96 + 2^97 < 2^98.
         const P_SHL33: u128 = (P as u128) << 33;
-        let r = (l0 as u128) + (l1 as u128) * (Self::NEG_ORDER as u128) + P_SHL33
-            - (l2 as u128) * (1u128 << 32);
+        let r = (l0 as u128) + (l1 as u128) * (Self::NEG_ORDER as u128) + P_SHL33 - (l2 as u128) * (1u128 << 32);
         reduce128(r)
     }
 }
