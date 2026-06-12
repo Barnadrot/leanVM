@@ -2,10 +2,7 @@
 
 use backend::*;
 
-use crate::{
-    DIMENSION, EXEC_COL_AUX_1, EXEC_COL_MODE_A, EXEC_COL_MODE_B, EXEC_COL_MODE_C, F, FileId, FunctionName, Hint,
-    N_INSTRUCTION_COLUMNS, SourceLocation, instr_idx,
-};
+use crate::{DIMENSION, F, FileId, FunctionName, Hint, N_INSTRUCTION_COLUMNS, SourceLocation};
 
 use super::Instruction;
 use super::encoder::field_representation;
@@ -57,7 +54,6 @@ impl Bytecode {
 
         let encoded: Vec<[F; N_INSTRUCTION_COLUMNS]> =
             parallel::par_map_collect(code.len(), |i| field_representation(&code[i].instruction));
-        validate_modes(&encoded);
         let row_width = N_INSTRUCTION_COLUMNS.next_power_of_two();
         let mut instructions_multilinear = F::zero_vec(code.len() * row_width);
         for (row, fields) in instructions_multilinear.chunks_exact_mut(row_width).zip(&encoded) {
@@ -146,37 +142,6 @@ impl Bytecode {
 
     pub fn bytecode_claim_size(&self) -> usize {
         (self.cumulated_n_vars() + 1) * DIMENSION
-    }
-}
-
-/// h9-B static domain check. The AIR's Lagrange decoders assume the mode columns
-/// live in {0,1,2}; the bytecode lookup grounds the witness instruction columns to
-/// this public encoding, so the domain is enforced once here instead of by
-/// range constraints. Also pins the encoder invariants the AIR relies on:
-/// M_A = 2 ⟺ M_B = 2 (the old flag_ab_fp pairing) and DEREF ⇒ M_B = 1
-/// (so the standard addr_b term is vacuous on deref rows).
-fn validate_modes(encoded: &[[F; N_INSTRUCTION_COLUMNS]]) {
-    let (m_a, m_b, m_c) = (
-        instr_idx(EXEC_COL_MODE_A),
-        instr_idx(EXEC_COL_MODE_B),
-        instr_idx(EXEC_COL_MODE_C),
-    );
-    let aux_1 = instr_idx(EXEC_COL_AUX_1);
-    for (pc, fields) in encoded.iter().enumerate() {
-        for col in [m_a, m_b, m_c] {
-            assert!(
-                [F::ZERO, F::ONE, F::TWO].contains(&fields[col]),
-                "pc {pc}: mode column {col} outside {{0,1,2}}"
-            );
-        }
-        assert_eq!(
-            fields[m_a] == F::TWO,
-            fields[m_b] == F::TWO,
-            "pc {pc}: M_A = 2 ⟺ M_B = 2 violated"
-        );
-        if fields[aux_1] == F::TWO {
-            assert_eq!(fields[m_b], F::ONE, "pc {pc}: DEREF requires M_B = 1");
-        }
     }
 }
 

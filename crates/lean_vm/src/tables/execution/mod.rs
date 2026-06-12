@@ -78,11 +78,11 @@ impl<const BUS: bool> TableT for ExecutionTable<BUS> {
         let mut padding_row = vec![F::ZERO; N_TOTAL_EXECUTION_COLUMNS + N_TEMPORARY_EXEC_COLUMNS];
         padding_row[EXEC_COL_PC] = F::from_usize(ending_pc);
         padding_row[EXEC_COL_FLAG_JUMP] = F::ONE;
-        padding_row[EXEC_COL_MODE_A] = F::ONE; // immediate
+        padding_row[EXEC_COL_FLAG_A] = F::ONE;
         padding_row[EXEC_COL_OPERAND_A] = F::ONE;
-        padding_row[EXEC_COL_MODE_B] = F::ONE; // immediate
+        padding_row[EXEC_COL_FLAG_B] = F::ONE;
         padding_row[EXEC_COL_OPERAND_B] = F::from_usize(ending_pc); // jump dest = ending_pc (nu_b)
-        padding_row[EXEC_COL_MODE_C] = F::TWO; // fp-relative; this is kind of arbitrary
+        padding_row[EXEC_COL_FLAG_C_FP] = F::ONE; // this is kind of arbitrary
         padding_row[EXEC_COL_NU_A] = F::ONE; // we always jump here (self-loop, so condition = nu_a = 1)
         padding_row[EXEC_COL_NU_B] = F::from_usize(ending_pc); // nu_b = jump dest = ending_pc
         // h9-A: the virtual address expressions evaluate to 0 on padding rows
@@ -121,21 +121,17 @@ mod h9_layout_tests {
         let mem0 = F::from_usize(424242);
         let row = ExecutionTable::<true>.padding_row(999, 998, 7, mem0);
         assert_eq!(row.len(), N_TOTAL_EXECUTION_COLUMNS + N_TEMPORARY_EXEC_COLUMNS);
-        assert_eq!(N_TOTAL_EXECUTION_COLUMNS, 15);
+        assert_eq!(N_TOTAL_EXECUTION_COLUMNS, 17);
         assert_eq!(N_TEMPORARY_EXEC_COLUMNS, 7);
 
         let f = |i: usize| row[i];
         let one = F::ONE;
         let aux_1 = f(EXEC_COL_AUX_1);
         let flag_deref = (aux_1 * (aux_1 - one)).halve();
-        // h9-B Lagrange decoders (must mirror air.rs exactly)
-        let dec1 = |m: F| m * F::TWO - m * m;
-        let dec2 = |m: F| (m * (m - one)).halve();
-        let (m_a, m_b, m_c) = (f(EXEC_COL_MODE_A), f(EXEC_COL_MODE_B), f(EXEC_COL_MODE_C));
-        let addr_a = (one - dec1(m_a) - dec2(m_a)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_A));
-        let addr_b = (one - dec1(m_b) - dec2(m_b)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_B))
+        let addr_a = (one - f(EXEC_COL_FLAG_A) - f(EXEC_COL_FLAG_AB_FP)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_A));
+        let addr_b = (one - f(EXEC_COL_FLAG_B) - f(EXEC_COL_FLAG_AB_FP)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_B))
             + flag_deref * (f(EXEC_COL_VALUE_A) + f(EXEC_COL_OPERAND_B));
-        let addr_c = (one - dec1(m_c) - dec2(m_c)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_C));
+        let addr_c = (one - f(EXEC_COL_FLAG_C) - f(EXEC_COL_FLAG_C_FP)) * (f(EXEC_COL_FP) + f(EXEC_COL_OPERAND_C));
         assert_eq!(addr_a, F::ZERO);
         assert_eq!(addr_b, F::ZERO);
         assert_eq!(addr_c, F::ZERO);
