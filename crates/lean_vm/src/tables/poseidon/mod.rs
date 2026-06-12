@@ -263,7 +263,7 @@ impl<const BUS: bool> TableT for Poseidon8Precompile<BUS> {
         buses
     }
 
-    fn padding_row(&self, zero_vec_ptr: usize, null_hash_ptr: usize, _ending_pc: usize) -> Vec<F> {
+    fn padding_row(&self, zero_vec_ptr: usize, null_hash_ptr: usize, _ending_pc: usize, _mem0: F) -> Vec<F> {
         let mut row = vec![F::ZERO; num_cols_total_poseidon_8()];
         row[POSEIDON_8_COL_MULTIPLICITY] = F::ZERO;
         row[POSEIDON_8_COL_NU_B] = F::from_usize(zero_vec_ptr);

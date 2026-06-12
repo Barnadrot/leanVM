@@ -205,7 +205,10 @@ pub trait TableT: Air {
     fn name(&self) -> &'static str;
     fn table(&self) -> Table;
     fn bus_interactions(&self) -> Vec<BusInteraction>;
-    fn padding_row(&self, zero_vec_ptr: usize, null_hash_ptr: usize, ending_pc: usize) -> Vec<F>;
+    /// `mem0`: the value at memory address 0 (= public_input[0]). h9-A padding rows
+    /// have virtual addresses 0, so their VALUE_* must equal memory[0] for the
+    /// memory argument to balance.
+    fn padding_row(&self, zero_vec_ptr: usize, null_hash_ptr: usize, ending_pc: usize, mem0: F) -> Vec<F>;
     fn execute<M: MemoryAccess>(
         &self,
         arg_a: F,
