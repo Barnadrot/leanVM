@@ -100,7 +100,19 @@ fn handle_product_computation<'a, EF: ExtensionField<PF<EF>>>(group: &MleGroupRe
             compute_product_sumcheck_polynomial(multilinears[0], multilinears[1], sum, identity_decompose)
         }
         MleGroupRef::ExtensionPacked(multilinears) => {
-            compute_product_sumcheck_polynomial(multilinears[0], multilinears[1], sum, packing_decompose)
+            // T5' (plan_spec §7): production WHIR rounds-2+ enter HERE (not via
+            // run_product_sumcheck's ext-ext arms). DIM==3 routes to the deferred
+            // cubic-Karatsuba kernel; other dims keep the eager generic path.
+            if EF::DIMENSION == 3 {
+                compute_product_sumcheck_polynomial_ext_ext_packed::<3, _, _, _, EF>(
+                    multilinears[0],
+                    multilinears[1],
+                    sum,
+                    packing_decompose,
+                )
+            } else {
+                compute_product_sumcheck_polynomial(multilinears[0], multilinears[1], sum, packing_decompose)
+            }
         }
         _ => unimplemented!(),
     };
@@ -125,13 +137,24 @@ fn handle_product_computation_with_fold<'a, EF: ExtensionField<PF<EF>>>(
             (poly, MleGroupOwned::Extension(folded))
         }
         MleGroupRef::ExtensionPacked(multilinears) => {
-            let (poly, folded) = fold_and_compute_product_sumcheck_polynomial(
-                multilinears[0],
-                multilinears[1],
-                prev_folding_factor,
-                sum,
-                packing_decompose,
-            );
+            // T5' (plan_spec §7): see handle_product_computation.
+            let (poly, folded) = if EF::DIMENSION == 3 {
+                fold_and_compute_product_sumcheck_polynomial_ext_ext_packed::<3, _, _, _, EF>(
+                    multilinears[0],
+                    multilinears[1],
+                    prev_folding_factor,
+                    sum,
+                    packing_decompose,
+                )
+            } else {
+                fold_and_compute_product_sumcheck_polynomial(
+                    multilinears[0],
+                    multilinears[1],
+                    prev_folding_factor,
+                    sum,
+                    packing_decompose,
+                )
+            };
             (poly, MleGroupOwned::ExtensionPacked(folded))
         }
         _ => unimplemented!(),
