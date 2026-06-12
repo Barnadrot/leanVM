@@ -118,6 +118,28 @@ const AUX_COLS_PER_ROW: usize = num_cols_poseidon_8() - POSEIDON_8_COL_ROUND_STA
 // decomposition so only 2 cols/round are emitted.
 
 fn mds_vec_mul(state: &[F; WIDTH]) -> [F; WIDTH] {
+    // u128-accumulator scheme replicating `mds_mul_scalar`
+    // (crates/backend/goldilocks/src/poseidon1.rs:85-110, read-only reference):
+    // all MDS8_ROW coefficients are <= 9, so each output is a sum of 8 products
+    // bounded by 8 * 9 * (p-1) < 2^71 — accumulate in u128 integers and reduce
+    // ONCE per lane via 2^64 = 2^32 - 1 (mod p), instead of 8 fully-reducing
+    // field multiplications. hi < 2^7, so hi * (2^32 - 1) fits u64 exactly.
+    let s: [u128; WIDTH] = std::array::from_fn(|j| state[j].as_canonical_u64() as u128);
+    let mut out = [F::ZERO; WIDTH];
+    for i in 0..WIDTH {
+        let mut acc: u128 = 0;
+        for j in 0..WIDTH {
+            acc += MDS8_ROW[(j + WIDTH - i) % WIDTH] as u128 * s[j];
+        }
+        let lo = acc as u64;
+        let hi = (acc >> 64) as u64;
+        out[i] = F::from_u64(lo) + F::from_u64(hi * 0xFFFF_FFFF);
+    }
+    out
+}
+
+#[cfg(test)]
+fn mds_vec_mul_oracle(state: &[F; WIDTH]) -> [F; WIDTH] {
     let mut out = [F::ZERO; WIDTH];
     for i in 0..WIDTH {
         let mut acc = state[0] * F::from_u64(MDS8_ROW[(WIDTH - i) % WIDTH] as u64);
@@ -686,5 +708,82 @@ impl<const BUS: bool> Air for Poseidon8Precompile<BUS> {
             }
             builder.assert_zero(gate_hi * (state[i + WIDTH / 2] - out_hi[i]));
         }
+    }
+}
+
+#[cfg(test)]
+mod mds_u128_tests {
+    use super::*;
+
+    fn xorshift(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    #[test]
+    fn mds_u128_equals_oracle() {
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        // boundary patterns incl. non-canonical representatives
+        let p = 0xFFFF_FFFF_0000_0001u64;
+        let specials = [0u64, 1, p - 1, p, p + 1, u64::MAX, 0xFFFF_FFFF, 1 << 63];
+        for &v in &specials {
+            let st: [F; WIDTH] = std::array::from_fn(|_| F::from_u64(v));
+            assert_eq!(mds_vec_mul(&st), mds_vec_mul_oracle(&st), "special {v:#x}");
+        }
+        for _ in 0..100_000 {
+            let st: [F; WIDTH] = std::array::from_fn(|_| F::from_u64(xorshift(&mut seed)));
+            let a = mds_vec_mul(&st);
+            let b = mds_vec_mul_oracle(&st);
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn mds_kernel_ab() {
+        let mut seed = 7u64;
+        let states: Vec<[F; WIDTH]> = (0..200_000)
+            .map(|_| std::array::from_fn(|_| F::from_u64(xorshift(&mut seed))))
+            .collect();
+        let t = std::time::Instant::now();
+        let mut sink = F::ZERO;
+        for st in &states {
+            sink += mds_vec_mul(st)[0];
+        }
+        let new_dt = t.elapsed();
+        let t = std::time::Instant::now();
+        for st in &states {
+            sink += mds_vec_mul_oracle(st)[0];
+        }
+        let old_dt = t.elapsed();
+        println!(
+            "mds new {:?} old {:?} speedup {:.2}x sink={sink:?}",
+            new_dt,
+            old_dt,
+            old_dt.as_secs_f64() / new_dt.as_secs_f64()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn mds_witness_microbench() {
+        let mut seed = 1u64;
+        let inputs: Vec<[F; 8]> = (0..10_000)
+            .map(|_| std::array::from_fn(|_| F::from_u64(xorshift(&mut seed))))
+            .collect();
+        let t = std::time::Instant::now();
+        let mut sink = F::ZERO;
+        for inp in &inputs {
+            let (_aux, out) = compute_poseidon8_witness(*inp);
+            sink += out[0];
+        }
+        let dt = t.elapsed();
+        println!(
+            "compute_poseidon8_witness: {:?} for 10k perms ({:.0} ns/perm), sink={sink:?}",
+            dt,
+            dt.as_nanos() as f64 / 10_000.0
+        );
     }
 }
