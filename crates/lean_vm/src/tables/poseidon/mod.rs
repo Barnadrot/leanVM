@@ -740,7 +740,10 @@ mod h1_kill_ladder {
     struct Lcg(u64);
     impl Lcg {
         fn next_f(&mut self) -> F {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             const P: u64 = (1 << 31) - (1 << 24) + 1;
             F::from_usize(((self.0 >> 32) % P) as usize)
         }
@@ -767,7 +770,8 @@ mod h1_kill_ladder {
         let hi_zs_halved: Vec<F> = ((N_FULL + 1)..=degree).map(|z| F::from_usize(z).halve()).collect();
         // stand-in Lagrange coefficients (cost-equivalent to production's
         // lagrange_basis_evals output)
-        let lagrange: [[F; N_FULL]; 6] = std::array::from_fn(|t| std::array::from_fn(|i| F::from_usize(3 + 5 * t + 7 * i)));
+        let lagrange: [[F; N_FULL]; 6] =
+            std::array::from_fn(|t| std::array::from_fn(|i| F::from_usize(3 + 5 * t + 7 * i)));
 
         let mut acc = vec![EFP::ZERO; degree];
         let mut point: Vec<FP> = Vec::with_capacity(n_flat);
@@ -899,7 +903,10 @@ mod h1_kill_ladder {
             times.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let median = times[times.len() / 2];
             let ns_per_pair = median * 1e9 / (PASSES * N_PAIRS) as f64;
-            println!("  {name}: median {ns_per_pair:.1} ns/packed-pair ({median:.3}s per {} pairs)", PASSES * N_PAIRS);
+            println!(
+                "  {name}: median {ns_per_pair:.1} ns/packed-pair ({median:.3}s per {} pairs)",
+                PASSES * N_PAIRS
+            );
             ns_per_pair
         };
 
@@ -918,7 +925,10 @@ mod h1_kill_ladder {
         println!(
             "RUNG-I: baseline {base:.1} ns/pair, candidate {cand:.1} ns/pair, delta -{delta:.1}% (gate: >=8% PASS / 4-8% GRAY / <4% KILL) => {verdict}"
         );
-        assert!(delta >= 4.0, "rung-i KILL: candidate only {delta:.1}% faster (need >=8%, gray zone >=4%)");
+        assert!(
+            delta >= 4.0,
+            "rung-i KILL: candidate only {delta:.1}% faster (need >=8%, gray zone >=4%)"
+        );
     }
 
     /// Rung ii: Merkle leaf-chunk crossing. Literals tie to the measured iter-2
@@ -958,6 +968,9 @@ mod h1_kill_ladder {
         // measured 1550-sig baseline logup data total; h1 delta = 0 tuples
         let logup_total: usize = 19_660_800;
         assert!(logup_total <= 1 << 25);
-        println!("RUNG-III: logup data {logup_total} <= 2^25 = {} (h1 delta: 0 tuples)", 1usize << 25);
+        println!(
+            "RUNG-III: logup data {logup_total} <= 2^25 = {} (h1 delta: 0 tuples)",
+            1usize << 25
+        );
     }
 }
