@@ -181,9 +181,7 @@ fn scalar_zero_products_interleaved() {
     // pinned here for the scalar path too).
     let mut rng = XorShift(0x5EED_0003);
     for _ in 0..1000 {
-        let mut terms: Vec<(u64, u64, bool)> = (0..16)
-            .map(|_| (rng.next(), rng.next(), rng.next() & 1 == 1))
-            .collect();
+        let mut terms: Vec<(u64, u64, bool)> = (0..16).map(|_| (rng.next(), rng.next(), rng.next() & 1 == 1)).collect();
         terms[3] = (0, 0, true);
         terms[7] = (0, rng.next(), true);
         terms[11] = (rng.next(), 0, false);
@@ -236,11 +234,7 @@ mod packed {
     }
 
     fn chains_from(rng: &mut XorShift, len: usize, sub_pattern: impl Fn(usize) -> bool) -> [Vec<(u64, u64, bool)>; W] {
-        core::array::from_fn(|_| {
-            (0..len)
-                .map(|j| (rng.next(), rng.next(), sub_pattern(j)))
-                .collect()
-        })
+        core::array::from_fn(|_| (0..len).map(|j| (rng.next(), rng.next(), sub_pattern(j))).collect())
     }
 
     #[test]
@@ -320,9 +314,7 @@ fn default_path_is_pure_sugar_cubic_extension() {
     // eager defaults; pins that the trait surface is value-preserving sugar.
     type EF = CubicExtensionFieldGL;
     let mut rng = XorShift(0x5EED_0004);
-    let rand_ef = |rng: &mut XorShift| -> EF {
-        EF::from_basis_coefficients_fn(|_| Goldilocks::new(rng.next()))
-    };
+    let rand_ef = |rng: &mut XorShift| -> EF { EF::from_basis_coefficients_fn(|_| Goldilocks::new(rng.next())) };
     for _ in 0..1000 {
         let terms: Vec<(EF, EF, bool)> = (0..8)
             .map(|_| (rand_ef(&mut rng), rand_ef(&mut rng), rng.next() & 1 == 1))
