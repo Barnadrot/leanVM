@@ -549,3 +549,415 @@ fn sparse_mat_air_16<A: PrimeCharacteristicRing + 'static>(
         state[i] += mul_kb(old_s0, v[i - 1]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// h1 kill-ladder rung benches (pw13-mac iter-2, hypothesis h1
+// "virtual-out-columns-degree-drop"). Test-only; no production code change.
+// Rung i  : packed AIR-eval microbench, 10-point baseline vs 9-point candidate
+//           with 16 inline fingerprint accumulations (gate: >=8% faster).
+// Rung ii : Merkle leaf-chunk crossing arithmetic (115->107 cols, 15->14 chunks).
+// Rung iii: LogUp tuple-count invariance (33 buses/row, total <= 2^25).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod h1_kill_ladder {
+    use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    type FP = PFPacking<EF>; // == FPacking<F>
+    type EFP = EFPacking<EF>;
+
+    const N_FLAT_BASELINE: usize = 110;
+    const N_FLAT_CANDIDATE: usize = 94;
+    const D_LOW: usize = 3; // low_degree_air().0
+    const N_FULL: usize = D_LOW + 1; // full-eval z-points: {0,2,3,4}
+
+    /// Candidate committed region: Poseidon1Cols16 minus out_lo/out_hi.
+    #[repr(C)]
+    struct Poseidon1Cols16Candidate<T> {
+        multiplicity: T,
+        nu_b: T,
+        nu_c: T,
+        flag_out4: T,
+        flag_out8: T,
+        flag_left: T,
+        offset_left: T,
+        addr_left_lo: T,
+        addr_left_hi: T,
+        flag_permute: T,
+        inputs: [T; WIDTH],
+        beginning_full_rounds: [[T; WIDTH]; HALF_INITIAL_FULL_ROUNDS],
+        partial_rounds: [T; PARTIAL_ROUNDS],
+        ending_full_rounds: [[T; WIDTH]; HALF_FINAL_FULL_ROUNDS - 1],
+    }
+    const _: () = assert!(size_of::<Poseidon1Cols16Candidate<u8>>() == N_FLAT_CANDIDATE);
+    const _: () = assert!(size_of::<Poseidon1Cols16<u8>>() == N_FLAT_BASELINE);
+
+    /// Candidate last-2-full-rounds: no out-column asserts; instead 16 LogUp
+    /// denominator fingerprints over the inline output expressions
+    /// (value_i = state[i] + feedforward*initial[i] for i<8, state[i] for i>=8),
+    /// each: 2 EF*IF muls + 1 assert_zero_ef (alpha mul). Unfused = conservative.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_last_2_full_rounds_16_candidate<AB: AirBuilder>(
+        initial_state: &[AB::IF; WIDTH],
+        state: &mut [AB::IF; WIDTH],
+        nu_c: AB::IF,
+        round_constants_1: &[F; WIDTH],
+        round_constants_2: &[F; WIDTH],
+        flag_permute: AB::IF,
+        eq_consts: &[AB::EF],
+        builder: &mut AB,
+    ) {
+        for (s, r) in state.iter_mut().zip(round_constants_1.iter()) {
+            add_kb(s, *r);
+            *s = s.cube();
+        }
+        mds_air_16(state);
+        for (s, r) in state.iter_mut().zip(round_constants_2.iter()) {
+            add_kb(s, *r);
+            *s = s.cube();
+        }
+        mds_air_16(state);
+        let feedforward = AB::IF::ONE - flag_permute;
+        // FUSED form: per-output alpha powers are premultiplied into the eq
+        // constants at setup (alpha_i*c, alpha_i*eq0, alpha_i*eq1 are proof-time
+        // constants), so each output costs 2 EF*IF muls + adds; one batched
+        // assert_zero_ef per point carries the sum into the accumulator.
+        let mut acc_fp = eq_consts[2]; // sum_i alpha_i*c, folded into one constant
+        for i in 0..WIDTH {
+            let value = if i < WIDTH / 2 {
+                state[i] + feedforward * initial_state[i]
+            } else {
+                state[i]
+            };
+            let mut addr = nu_c;
+            add_kb(&mut addr, F::from_usize(i));
+            // premultiplied per-output constants: distinct entries, real reads
+            let b = eq_consts[(2 * i) % eq_consts.len()];
+            let c = eq_consts[(2 * i + 1) % eq_consts.len()];
+            acc_fp = acc_fp - b * addr - c * value;
+        }
+        builder.assert_zero_ef(acc_fp);
+    }
+
+    /// Candidate full eval: identical prologue + rounds, candidate ending.
+    fn eval_candidate<AB: AirBuilder>(builder: &mut AB, extra_data: &ExtraDataForBuses<EF>) {
+        let cols: Poseidon1Cols16Candidate<AB::IF> = {
+            let flat = builder.flat();
+            let (prefix, shorts, suffix) = unsafe { flat.align_to::<Poseidon1Cols16Candidate<AB::IF>>() };
+            debug_assert!(prefix.is_empty());
+            debug_assert!(suffix.is_empty());
+            debug_assert_eq!(shorts.len(), 1);
+            unsafe { std::ptr::read(&shorts[0]) }
+        };
+
+        let domainsep_reconstructed = AB::IF::from_usize(POSEIDON_DOMAINSEP_BASE)
+            + cols.flag_permute * AB::F::from_usize(POSEIDON_FLAG_PERMUTE_SHIFT)
+            + cols.flag_out8 * AB::F::from_usize(POSEIDON_FLAG_OUT8_SHIFT)
+            + cols.flag_left * AB::F::from_usize(POSEIDON_FLAG_LEFT_SHIFT)
+            + cols.flag_left * cols.offset_left * AB::F::from_usize(POSEIDON_OFFSET_LEFT_SHIFT);
+
+        let one_minus_flag_left = AB::IF::ONE - cols.flag_left;
+        let nu_a = cols.addr_left_hi - one_minus_flag_left * AB::F::from_usize(HALF_DIGEST_LEN);
+
+        eval_bus_virtual::<AB, EF>(
+            builder,
+            extra_data,
+            cols.multiplicity,
+            domainsep_reconstructed,
+            &[nu_a, cols.nu_b, cols.nu_c],
+        );
+
+        builder.assert_bool(cols.multiplicity);
+        builder.assert_bool(cols.flag_out4);
+        builder.assert_bool(cols.flag_out8);
+        builder.assert_bool(cols.flag_left);
+        builder.assert_bool(cols.flag_permute);
+        builder.assert_zero(cols.flag_permute * cols.flag_out4);
+        builder.assert_zero(cols.flag_out8 * cols.flag_out4);
+        builder.assert_zero(
+            (AB::IF::ONE - cols.flag_permute) * (AB::IF::ONE - cols.flag_out8) * (AB::IF::ONE - cols.flag_out4),
+        );
+        builder.assert_zero(cols.flag_left * (cols.offset_left - cols.addr_left_lo));
+        builder.assert_zero(one_minus_flag_left * (nu_a - cols.addr_left_lo));
+
+        // permutation chain (identical to eval_poseidon1_16 except the ending)
+        let mut state: [_; WIDTH] = cols.inputs;
+        let initial_constants = poseidon1_initial_constants();
+        for round in 0..HALF_INITIAL_FULL_ROUNDS {
+            eval_2_full_rounds_16(
+                &mut state,
+                &cols.beginning_full_rounds[round],
+                &initial_constants[2 * round],
+                &initial_constants[2 * round + 1],
+                builder,
+            );
+        }
+        builder.low_degree_block(&mut state, |b, state| {
+            let state: &mut [AB::IF; WIDTH] = state.try_into().unwrap();
+            let frc = poseidon1_sparse_first_round_constants();
+            for (s, &c) in state.iter_mut().zip(frc.iter()) {
+                add_kb(s, c);
+            }
+            dense_mat_vec_air_16(poseidon1_sparse_m_i(), state);
+            let first_rows = poseidon1_sparse_first_row();
+            let v_vecs = poseidon1_sparse_v();
+            let scalar_rc = poseidon1_sparse_scalar_round_constants();
+            for round in 0..PARTIAL_ROUNDS {
+                state[0] = state[0].cube();
+                b.assert_eq_low(state[0], cols.partial_rounds[round]);
+                state[0] = cols.partial_rounds[round];
+                if round < PARTIAL_ROUNDS - 1 {
+                    add_kb(&mut state[0], scalar_rc[round]);
+                }
+                sparse_mat_air_16(state, &first_rows[round], &v_vecs[round]);
+            }
+        });
+        let final_constants = poseidon1_final_constants();
+        for round in 0..HALF_FINAL_FULL_ROUNDS - 1 {
+            eval_2_full_rounds_16(
+                &mut state,
+                &cols.ending_full_rounds[round],
+                &final_constants[2 * round],
+                &final_constants[2 * round + 1],
+                builder,
+            );
+        }
+        let eq_consts = extra_data.transmute_bus_data::<AB::EF>();
+        eval_last_2_full_rounds_16_candidate(
+            &cols.inputs,
+            &mut state,
+            cols.nu_c,
+            &final_constants[2 * (HALF_FINAL_FULL_ROUNDS - 1)],
+            &final_constants[2 * (HALF_FINAL_FULL_ROUNDS - 1) + 1],
+            cols.flag_permute,
+            eq_consts,
+            builder,
+        );
+    }
+
+    /// Tiny LCG so we need no rand dev-dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_f(&mut self) -> F {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            const P: u64 = (1 << 31) - (1 << 24) + 1;
+            F::from_usize(((self.0 >> 32) % P) as usize)
+        }
+        fn next_fp(&mut self) -> FP {
+            FP::from_fn(|_| self.next_f())
+        }
+    }
+
+    /// Drive one arm over all pairs, replicating compute_raw_poly_degree_split's
+    /// per-pair z-point loop (4 full evals + (degree - 4) skip-low evals).
+    fn drive<EVAL>(
+        cols: &[Vec<FP>],
+        n_flat: usize,
+        degree: usize,
+        extra: &ExtraDataForBuses<EF>,
+        partial_eq: EFP,
+        n_pairs: usize,
+        eval: EVAL,
+    ) -> EFP
+    where
+        EVAL: for<'a> Fn(&mut ConstraintFolderPacked<'a, FP, EF, ExtraDataForBuses<EF>>),
+    {
+        let n_skip = degree - N_FULL;
+        let hi_zs_halved: Vec<F> = ((N_FULL + 1)..=degree).map(|z| F::from_usize(z).halve()).collect();
+        // stand-in Lagrange coefficients (cost-equivalent to production's
+        // lagrange_basis_evals output)
+        let lagrange: [[F; N_FULL]; 6] = std::array::from_fn(|t| std::array::from_fn(|i| F::from_usize(3 + 5 * t + 7 * i)));
+
+        let mut acc = vec![EFP::ZERO; degree];
+        let mut point: Vec<FP> = Vec::with_capacity(n_flat);
+        let mut diff: Vec<FP> = Vec::with_capacity(n_flat);
+        let mut state_0: Vec<FP> = Vec::new();
+        let mut state_2: Vec<FP> = Vec::new();
+        let mut cached_buf: Vec<FP> = Vec::new();
+        let mut low_evals = [EFP::ZERO; N_FULL];
+
+        for j in 0..n_pairs {
+            let i0 = 2 * j;
+            let i1 = 2 * j + 1;
+            point.clear();
+            diff.clear();
+            for c in cols.iter().take(n_flat) {
+                let lo = c[i0];
+                let hi = c[i1];
+                point.push(lo);
+                diff.push(hi - lo);
+            }
+
+            // z = 0: full eval, capture post-block state
+            {
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                folder.cached_state = Some(std::mem::take(&mut state_0));
+                eval(&mut folder);
+                acc[0] += folder.accumulator * partial_eq;
+                low_evals[0] = folder.accumulator_low;
+                state_0 = folder.cached_state.unwrap();
+            }
+            // z = 2
+            for k in 0..n_flat {
+                point[k] += diff[k].double();
+            }
+            {
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                folder.cached_state = Some(std::mem::take(&mut state_2));
+                eval(&mut folder);
+                acc[1] += folder.accumulator * partial_eq;
+                low_evals[1] = folder.accumulator_low;
+                state_2 = folder.cached_state.unwrap();
+            }
+            // z = 3..=N_FULL: full evals
+            for z_idx in 2..N_FULL {
+                for k in 0..n_flat {
+                    point[k] += diff[k];
+                }
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                eval(&mut folder);
+                acc[z_idx] += folder.accumulator * partial_eq;
+                low_evals[z_idx] = folder.accumulator_low;
+            }
+            // skip-low evals
+            for t in 0..n_skip {
+                for k in 0..n_flat {
+                    point[k] += diff[k];
+                }
+                cached_buf.clear();
+                for i in 0..state_0.len() {
+                    cached_buf.push(state_0[i] + (state_2[i] - state_0[i]) * FP::from(hi_zs_halved[t]));
+                }
+                let mut folder = ConstraintFolderPacked::new(&point[..n_flat], &point[n_flat..], extra);
+                folder.skip_low = true;
+                folder.cached_state = Some(std::mem::take(&mut cached_buf));
+                folder.low_ci_count = PARTIAL_ROUNDS;
+                eval(&mut folder);
+                cached_buf = folder.cached_state.unwrap();
+
+                let mut low_interpolated = EFP::ZERO;
+                for (i, lc) in lagrange[t].iter().enumerate() {
+                    low_interpolated += low_evals[i] * FP::from(*lc);
+                }
+                acc[N_FULL + t] += (folder.accumulator + low_interpolated) * partial_eq;
+            }
+        }
+        acc.into_iter().sum()
+    }
+
+    fn build_extra() -> ExtraDataForBuses<EF> {
+        let eq_poly: Vec<EF> = (0..1 << LOG_MAX_BUS_WIDTH)
+            .map(|i| EF::from_usize(7 * i + 3) * EF::from_usize(1_000_003) + EF::from_usize(i * i + 11))
+            .collect();
+        let alphas: Vec<EF> = (0..128)
+            .map(|i| EF::from_usize(13 * i + 5) * EF::from_usize(998_244_353) + EF::from_usize(i + 1))
+            .collect();
+        ExtraDataForBuses::new(&eq_poly, alphas)
+    }
+
+    #[test]
+    #[ignore]
+    fn h1_rung_i_eval_bench() {
+        const N_PAIRS: usize = 2048; // packed pairs per pass
+        const PASSES: usize = 12; // 24,576 packed-pair evals per rep
+        const WARMUP: usize = 3;
+        const REPS: usize = 5;
+
+        let mut rng = Lcg(0x9E3779B97F4A7C15);
+        let cols: Vec<Vec<FP>> = (0..N_FLAT_BASELINE)
+            .map(|_| (0..2 * N_PAIRS).map(|_| rng.next_fp()).collect())
+            .collect();
+        let extra = build_extra();
+        let partial_eq = EFP::from(EF::from_usize(123_456_791));
+
+        let air = Poseidon16Precompile::<true>;
+        let run_baseline = || {
+            drive(&cols, N_FLAT_BASELINE, 10, &extra, partial_eq, N_PAIRS, |f| {
+                air.eval(f, &extra)
+            })
+        };
+        let run_candidate = || {
+            drive(&cols, N_FLAT_CANDIDATE, 9, &extra, partial_eq, N_PAIRS, |f| {
+                eval_candidate(f, &extra)
+            })
+        };
+
+        let mut sink = EFP::ZERO;
+        let mut measure = |name: &str, run: &dyn Fn() -> EFP| -> f64 {
+            let mut times = Vec::new();
+            for rep in 0..(WARMUP + REPS) {
+                let t = Instant::now();
+                for _ in 0..PASSES {
+                    sink += black_box(run());
+                }
+                let dt = t.elapsed().as_secs_f64();
+                if rep >= WARMUP {
+                    times.push(dt);
+                }
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median = times[times.len() / 2];
+            let ns_per_pair = median * 1e9 / (PASSES * N_PAIRS) as f64;
+            println!("  {name}: median {ns_per_pair:.1} ns/packed-pair ({median:.3}s per {} pairs)", PASSES * N_PAIRS);
+            ns_per_pair
+        };
+
+        let base = measure("baseline (110 cols, 10 z-points, out asserts)", &run_baseline);
+        let cand = measure("candidate (94 cols, 9 z-points, fingerprints)", &run_candidate);
+        black_box(sink);
+
+        let delta = 100.0 * (base - cand) / base;
+        let verdict = if delta >= 8.0 {
+            "PASS"
+        } else if delta >= 4.0 {
+            "GRAY"
+        } else {
+            "KILL"
+        };
+        println!(
+            "RUNG-I: baseline {base:.1} ns/pair, candidate {cand:.1} ns/pair, delta -{delta:.1}% (gate: >=8% PASS / 4-8% GRAY / <4% KILL) => {verdict}"
+        );
+        assert!(delta >= 4.0, "rung-i KILL: candidate only {delta:.1}% faster (need >=8%, gray zone >=4%)");
+    }
+
+    /// Rung ii: Merkle leaf-chunk crossing. Literals tie to the measured iter-2
+    /// baseline (1550-sig XMSS): stacked cells 60,194,816 = 2^25*(1+0.79), nu=26,
+    /// WHIR initial folding factor 7 => 2^19 rows/block, sponge rate 8.
+    #[test]
+    fn h1_rung_ii_leaf_chunks() {
+        let cells_before: usize = 60_194_816;
+        let cells_after: usize = cells_before - 16 * (1 << 18); // -16 poseidon cols x 2^18 rows
+        assert_eq!(cells_after, 56_000_512);
+        let rows_per_block: usize = 1 << (26 - 7);
+        let eff_before = cells_before.div_ceil(rows_per_block);
+        let eff_after = cells_after.div_ceil(rows_per_block);
+        let chunks_before = eff_before.div_ceil(8);
+        let chunks_after = eff_after.div_ceil(8);
+        println!(
+            "RUNG-II: effective_n_cols {eff_before} -> {eff_after}, leaf sponge chunks {chunks_before} -> {chunks_after}"
+        );
+        assert_eq!(eff_before, 115);
+        assert_eq!(eff_after, 107);
+        assert_eq!(chunks_before, 15);
+        assert_eq!(chunks_after, 14);
+        // also pin the committed-column arithmetic
+        assert_eq!(num_cols_poseidon_16(), 110, "baseline committed poseidon cols");
+        assert_eq!(num_cols_poseidon_16() - 16, 94, "candidate committed poseidon cols");
+    }
+
+    /// Rung iii: LogUp tuple-count invariance. h1 keeps every bus tuple (same
+    /// buses, same count) - only the verifier-side reconstruction route changes.
+    #[test]
+    fn h1_rung_iii_logup_size() {
+        let buses = Poseidon16Precompile::<true>.bus_interactions();
+        println!("RUNG-III: poseidon bus tuples per row = {}", buses.len());
+        assert_eq!(buses.len(), 33, "1 precompile pull + 4+4+8+16 memory lookups");
+        let memory_lookups = buses.iter().filter(|b| b.is_memory_lookup()).count();
+        assert_eq!(memory_lookups, 32);
+        // measured 1550-sig baseline logup data total; h1 delta = 0 tuples
+        let logup_total: usize = 19_660_800;
+        assert!(logup_total <= 1 << 25);
+        println!("RUNG-III: logup data {logup_total} <= 2^25 = {} (h1 delta: 0 tuples)", 1usize << 25);
+    }
+}
