@@ -189,9 +189,14 @@ pub fn compute_product_sumcheck_polynomial_base_ext_packed<
     let chunk_size = 1024;
 
     let n_chunks = half.div_ceil(chunk_size);
+    // Deferred-reduction packed accumulation (lazy-accumulator protocol, see
+    // PrimeCharacteristicRing::unreduced_mul): each chunk keeps 2*DIM unreduced
+    // accumulators and reduces once at chunk exit. All terms are raw products
+    // added positively, so n_sub = 0. Chunk length 1024 <= 2^20 honors the
+    // protocol bound (1 term per accumulator per iteration).
     let (c0_acc, c2_acc) = parallel::map_reduce(
         n_chunks,
-        || ([F::ZERO; DIM], [F::ZERO; DIM]),
+        || ([PF::ZERO; DIM], [PF::ZERO; DIM]),
         |chunk| {
             let start = chunk * chunk_size;
             let end = (start + chunk_size).min(half);
@@ -199,29 +204,34 @@ pub fn compute_product_sumcheck_polynomial_base_ext_packed<
             let b_hi = &pol_0[half + start..half + end];
             let e_lo = &pol_1[start..end];
             let e_hi = &pol_1[half + start..half + end];
-            let mut c0 = [F::ZERO; DIM];
-            let mut c2 = [F::ZERO; DIM];
+            // Two passes over the (L2-resident) chunk, halving live accumulator
+            // registers per loop (plan_spec §3.1 register-pressure fallback:
+            // 6 accumulators x 4 zmm = 24 live exceeded the budget and spilled
+            // in-loop; 3 x 4 = 12 per pass fits).
+            let mut c0_lazy: [[PF; 4]; DIM] = core::array::from_fn(|_| PF::lazy_acc_zero());
             for i in 0..b_lo.len() {
-                let x0_lanes = b_lo[i].as_slice();
-                let x1_lanes = b_hi[i].as_slice();
+                let x0 = b_lo[i];
+                let y0_coords = e_lo[i].as_basis_coefficients_slice();
+                for j in 0..DIM {
+                    c0_lazy[j] = PF::lazy_acc_add(c0_lazy[j], PF::unreduced_mul(y0_coords[j], x0));
+                }
+            }
+            let mut c2_lazy: [[PF; 4]; DIM] = core::array::from_fn(|_| PF::lazy_acc_zero());
+            for i in 0..b_lo.len() {
+                let dx = b_hi[i] - b_lo[i];
                 let y0_coords = e_lo[i].as_basis_coefficients_slice();
                 let y1_coords = e_hi[i].as_basis_coefficients_slice();
                 for j in 0..DIM {
-                    let y0_j = y0_coords[j].as_slice();
-                    let y1_j = y1_coords[j].as_slice();
-                    for lane in 0..PF::WIDTH {
-                        let x0 = x0_lanes[lane];
-                        let x1 = x1_lanes[lane];
-                        let y0 = y0_j[lane];
-                        let y1 = y1_j[lane];
-                        c0[j] += y0 * x0;
-                        c2[j] += (y1 - y0) * (x1 - x0);
-                    }
+                    let dy = y1_coords[j] - y0_coords[j];
+                    c2_lazy[j] = PF::lazy_acc_add(c2_lazy[j], PF::unreduced_mul(dy, dx));
                 }
             }
-            (c0, c2)
+            (
+                core::array::from_fn(|j| PF::lazy_acc_finish(c0_lazy[j], 0)),
+                core::array::from_fn(|j| PF::lazy_acc_finish(c2_lazy[j], 0)),
+            )
         },
-        |(mut a0, mut a2): ([F; DIM], [F; DIM]), (b0, b2): ([F; DIM], [F; DIM])| {
+        |(mut a0, mut a2): ([PF; DIM], [PF; DIM]), (b0, b2): ([PF; DIM], [PF; DIM])| {
             for j in 0..DIM {
                 a0[j] += b0[j];
                 a2[j] += b2[j];
@@ -230,8 +240,16 @@ pub fn compute_product_sumcheck_polynomial_base_ext_packed<
         },
     );
 
-    let c0 = EF::from_basis_coefficients_fn(|j| c0_acc[j]);
-    let c2 = EF::from_basis_coefficients_fn(|j| c2_acc[j]);
+    // Horizontal lane sum once at the very end.
+    let lane_sum = |p: PF| {
+        let mut s = F::ZERO;
+        for &v in p.as_slice() {
+            s += v;
+        }
+        s
+    };
+    let c0 = EF::from_basis_coefficients_fn(|j| lane_sum(c0_acc[j]));
+    let c2 = EF::from_basis_coefficients_fn(|j| lane_sum(c2_acc[j]));
     let c1 = sum - c0.double() - c2;
 
     DensePolynomial::new(vec![c0, c1, c2])
@@ -330,4 +348,143 @@ where
     let constant = y_0 * x_0;
     let quadratic = (y_1 - y_0) * (x_1 - x_0);
     (constant, quadratic)
+}
+
+#[cfg(test)]
+mod base_ext_packed_kernel_tests {
+    use super::*;
+    use koala_bear::{KoalaBear, PackedQuinticExtensionFieldKB, QuinticExtensionFieldKB};
+
+    /// Pre-T4 kernel body, kept verbatim as the equality oracle (scalar per-lane
+    /// accumulation with eager reduction). Proves the restructured kernel is
+    /// value-preserving; the Goldilocks lazy primitives themselves are proven by
+    /// the goldilocks crate's T2/T3 oracle tests (plan_spec §4.2 composition).
+    fn reference_base_ext_packed<
+        const DIM: usize,
+        F: PrimeField64,
+        PF: PackedField<Scalar = F>,
+        EFP: BasedVectorSpace<PF> + Copy + Send + Sync,
+        EF: Field + BasedVectorSpace<F>,
+    >(
+        pol_0: &[PF],
+        pol_1: &[EFP],
+        sum: EF,
+    ) -> DensePolynomial<EF> {
+        assert_eq!(DIM, EF::DIMENSION);
+        let n = pol_0.len();
+        assert_eq!(n, pol_1.len());
+        assert!(n.is_power_of_two());
+        let half = n / 2;
+        let mut c0_acc = [F::ZERO; DIM];
+        let mut c2_acc = [F::ZERO; DIM];
+        for i in 0..half {
+            let x0_lanes = pol_0[i].as_slice();
+            let x1_lanes = pol_0[half + i].as_slice();
+            let y0_coords = pol_1[i].as_basis_coefficients_slice();
+            let y1_coords = pol_1[half + i].as_basis_coefficients_slice();
+            for j in 0..DIM {
+                let y0_j = y0_coords[j].as_slice();
+                let y1_j = y1_coords[j].as_slice();
+                for lane in 0..PF::WIDTH {
+                    let x0 = x0_lanes[lane];
+                    let x1 = x1_lanes[lane];
+                    let y0 = y0_j[lane];
+                    let y1 = y1_j[lane];
+                    c0_acc[j] += y0 * x0;
+                    c2_acc[j] += (y1 - y0) * (x1 - x0);
+                }
+            }
+        }
+        let c0 = EF::from_basis_coefficients_fn(|j| c0_acc[j]);
+        let c2 = EF::from_basis_coefficients_fn(|j| c2_acc[j]);
+        let c1 = sum - c0.double() - c2;
+        DensePolynomial::new(vec![c0, c1, c2])
+    }
+
+    // Minimal deterministic PRNG (same xorshift precedent as the goldilocks
+    // lazy_acc tests; no new deps).
+    struct XorShift(u64);
+    impl XorShift {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    type PFKb = <KoalaBear as Field>::Packing;
+    const DIM_KB: usize = 5;
+
+    fn random_inputs(seed: u64, log_n: usize) -> (Vec<PFKb>, Vec<PackedQuinticExtensionFieldKB>) {
+        let mut rng = XorShift(seed | 1);
+        let n = 1 << log_n;
+        let base: Vec<PFKb> = (0..n)
+            .map(|_| PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64())))
+            .collect();
+        let ext: Vec<PackedQuinticExtensionFieldKB> = (0..n)
+            .map(|_| {
+                PackedQuinticExtensionFieldKB::from_basis_coefficients_fn(|_| {
+                    PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64()))
+                })
+            })
+            .collect();
+        (base, ext)
+    }
+
+    #[test]
+    fn rewritten_kernel_matches_reference_randomized() {
+        for (seed, log_n) in [(1u64, 1usize), (2, 2), (3, 4), (4, 7), (5, 11), (6, 12)] {
+            let (base, ext) = random_inputs(seed, log_n);
+            let sum = QuinticExtensionFieldKB::from_basis_coefficients_fn(|j| KoalaBear::from_u64(seed + j as u64));
+            let new = compute_product_sumcheck_polynomial_base_ext_packed::<
+                DIM_KB,
+                _,
+                _,
+                _,
+                QuinticExtensionFieldKB,
+            >(&base, &ext, sum);
+            let reference =
+                reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
+            assert_eq!(new.coeffs, reference.coeffs, "seed={seed} log_n={log_n}");
+        }
+    }
+
+    #[test]
+    fn rewritten_kernel_matches_reference_boundary() {
+        // Zero blocks, all-ones, and max-representative patterns interleaved:
+        // exercises zero products and the chunk-boundary path (non-multiple of
+        // chunk_size handled by the (start + chunk_size).min(half) slicing).
+        let n = 1 << 8;
+        let mut rng = XorShift(0xDEAD_BEEF);
+        let base: Vec<PFKb> = (0..n)
+            .map(|i| match i % 4 {
+                0 => PFKb::ZERO,
+                1 => PFKb::ONE,
+                2 => PFKb::from_fn(|_| KoalaBear::from_u64(u64::MAX)),
+                _ => PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64())),
+            })
+            .collect();
+        let ext: Vec<PackedQuinticExtensionFieldKB> = (0..n)
+            .map(|i| match i % 3 {
+                0 => PackedQuinticExtensionFieldKB::ZERO,
+                1 => PackedQuinticExtensionFieldKB::ONE,
+                _ => PackedQuinticExtensionFieldKB::from_basis_coefficients_fn(|_| {
+                    PFKb::from_fn(|_| KoalaBear::from_u64(rng.next_u64()))
+                }),
+            })
+            .collect();
+        let sum = QuinticExtensionFieldKB::ONE;
+        let new = compute_product_sumcheck_polynomial_base_ext_packed::<
+            DIM_KB,
+            _,
+            _,
+            _,
+            QuinticExtensionFieldKB,
+        >(&base, &ext, sum);
+        let reference = reference_base_ext_packed::<DIM_KB, _, _, _, QuinticExtensionFieldKB>(&base, &ext, sum);
+        assert_eq!(new.coeffs, reference.coeffs);
+    }
 }
