@@ -97,6 +97,7 @@ impl<const BUS: bool> TableT for ExtensionOpPrecompile<BUS> {
                 BusData::Column(COL_IDX_B),
                 BusData::Column(COL_IDX_RES),
             ],
+            deferred_claim: false,
         }];
         buses.extend(memory_lookups_consecutive(COL_IDX_A, COL_V_A, DIMENSION));
         buses.extend(memory_lookups_consecutive(COL_IDX_B, COL_V_B, DIMENSION));

@@ -239,6 +239,7 @@ impl<const BUS: bool> TableT for Poseidon8Precompile<BUS> {
                 BusData::Column(POSEIDON_8_COL_NU_B),
                 BusData::Column(POSEIDON_8_COL_NU_C),
             ],
+            deferred_claim: false,
         }];
         buses.extend(memory_lookups_consecutive(
             POSEIDON_8_COL_ADDR_LEFT_LO,

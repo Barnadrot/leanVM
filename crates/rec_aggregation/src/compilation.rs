@@ -496,7 +496,10 @@ fn air_eval_in_zk_dsl<T: TableT>(table: T) -> String
 where
     T::ExtraData: Default,
 {
-    let (constraints, bus_multiplicity, bus_data) = get_symbolic_constraints_and_bus_data_values::<F, _>(&table);
+    // h9-A/T2 mechanical closure: the 4th element (deferred-claim expression groups) is
+    // consumed by T3's recursion codegen; ignored here until then.
+    let (constraints, bus_multiplicity, bus_data, _deferred_groups) =
+        get_symbolic_constraints_and_bus_data_values::<F, _>(&table);
     // `bus_data`'s last entry is the domainsep (logup domain separation).
     let (bus_domainsep, bus_real_data) = bus_data.split_last().unwrap();
     let mut ctx = AirCodegenCtx::new();

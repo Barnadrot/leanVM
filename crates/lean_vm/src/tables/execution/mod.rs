@@ -34,6 +34,7 @@ impl<const BUS: bool> TableT for ExecutionTable<BUS> {
                 .map(|i| BusData::Column(N_RUNTIME_COLUMNS + i))
                 .chain(std::iter::once(BusData::Column(EXEC_COL_PC)))
                 .collect(),
+            deferred_claim: false,
         };
         let precompile_bus = BusInteraction {
             direction: BusDirection::Push,
@@ -44,13 +45,32 @@ impl<const BUS: bool> TableT for ExecutionTable<BUS> {
                 BusData::Column(EXEC_COL_NU_B),
                 BusData::Column(EXEC_COL_NU_C),
             ],
+            deferred_claim: false,
         };
         // Convention shared with the other tables: the unique Multiplicity::Column bus
         // comes first; everything that follows is Multiplicity::One.
         let mut buses = vec![precompile_bus, bytecode_lookup];
-        buses.extend(memory_lookups_consecutive(EXEC_COL_ADDR_A, EXEC_COL_VALUE_A, 1));
-        buses.extend(memory_lookups_consecutive(EXEC_COL_ADDR_B, EXEC_COL_VALUE_B, 1));
-        buses.extend(memory_lookups_consecutive(EXEC_COL_ADDR_C, EXEC_COL_VALUE_C, 1));
+        // h9-A: ADDR_A/B/C are temporary (virtual) columns — these three lookups are
+        // deferred-claim buses, grounded by the eval_bus_data_only constraints that the
+        // exec AIR emits right after the precompile bus pair (same order: A, B, C).
+        buses.extend(memory_lookups_consecutive_with_claim(
+            EXEC_COL_ADDR_A,
+            EXEC_COL_VALUE_A,
+            1,
+            true,
+        ));
+        buses.extend(memory_lookups_consecutive_with_claim(
+            EXEC_COL_ADDR_B,
+            EXEC_COL_VALUE_B,
+            1,
+            true,
+        ));
+        buses.extend(memory_lookups_consecutive_with_claim(
+            EXEC_COL_ADDR_C,
+            EXEC_COL_VALUE_C,
+            1,
+            true,
+        ));
         buses
     }
 
